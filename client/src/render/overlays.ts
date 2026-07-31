@@ -32,12 +32,16 @@ export class Overlays {
   private cardData: DeathCard | null = null;
   private cardT = 0;
   private pressAny: Text | null = null;
+  private pressAnyBox: Graphics | null = null;
+  private cardRecDot: Text | null = null;
   private cardScanTex: Texture;
 
   private title = new Container();
+  private titleWord = new Container();
   private titleT = -1;
   private noteFallV = -1;
   private titleSub: Text;
+  private titleSubShown = -1;
 
   private t = 0;
 
@@ -191,7 +195,25 @@ export class Overlays {
     this.pressAny.text = 'PRESS ANY KEY';
     this.pressAny.position.set(W / 2, H - 16);
 
-    this.card.addChild(bg, scan, halo, portrait, name, floor, heardL, heard, didL, did, last, scrapSp, scrap, this.pressAny);
+    // 1px amber border pulsing gently around PRESS ANY KEY
+    const paW = this.pressAny.width + 12;
+    const paH = this.pressAny.height + 4;
+    this.pressAnyBox = new Graphics()
+      .roundRect(W / 2 - paW / 2, H - 16 - paH / 2, paW, paH, 2)
+      .stroke({ color: AMBER, width: 1 });
+    this.pressAnyBox.alpha = 0.1;
+
+    // the camera kept recording — slow REC ● in the card's corner
+    const recL = vt(10, AMBER_DIM);
+    recL.anchor.set(1, 0);
+    recL.text = 'REC';
+    recL.alpha = 0.8;
+    recL.position.set(W - 24, 10);
+    this.cardRecDot = vt(10, 0xff4d3a);
+    this.cardRecDot.text = '●';
+    this.cardRecDot.position.set(W - 20, 10);
+
+    this.card.addChild(bg, scan, halo, portrait, name, floor, heardL, heard, didL, did, last, scrapSp, scrap, this.pressAnyBox, this.pressAny, recL, this.cardRecDot);
     portrait.addChild(wheels, body, head);
     this.card.x = (VIEW_W - W) / 2;
   }
@@ -199,24 +221,31 @@ export class Overlays {
   // ---------------------------------------------------------------- title
 
   private buildTitle(): void {
-    const mk = (scale: number, alpha: number): Text => {
+    const mk = (dx: number, dy: number, alpha: number): Text => {
       const g = new Text({
         text: 'ROBOT OPERATOR',
         style: { fontFamily: VT323, fontSize: 40, fill: AMBER, letterSpacing: 8 },
       });
       g.anchor.set(0.5);
-      g.position.set(VIEW_W / 2, 118);
-      g.scale.set(scale);
+      g.position.set(VIEW_W / 2 + dx, 118 + dy);
       g.alpha = alpha;
-      if (scale !== 1) g.blendMode = 'add'; // layered alpha copies = cheap glow
+      if (dx !== 0 || dy !== 0) g.blendMode = 'add'; // layered offset copies = cheap glow
       return g;
     };
-    this.title.addChild(mk(1.09, 0.08), mk(1.035, 0.17), mk(1, 1));
+    // diamond-pattern halo: 1px ring bright, 2px ring faint — no boxy scale ghost
+    this.titleWord.addChild(
+      mk(2, 0, 0.05), mk(-2, 0, 0.05), mk(0, 2, 0.05), mk(0, -2, 0.05),
+      mk(1, 0, 0.12), mk(-1, 0, 0.12), mk(0, 1, 0.12), mk(0, -1, 0.12),
+      mk(0, 0, 1),
+    );
+    this.title.addChild(this.titleWord);
 
+    // measure at full text, then left-anchor so the typewriter reveal stays put
     this.titleSub.text = 'TO BE CONTINUED';
-    this.titleSub.anchor.set(0.5);
     this.titleSub.style.letterSpacing = 6;
-    this.titleSub.position.set(VIEW_W / 2, 164);
+    this.titleSub.anchor.set(0, 0);
+    this.titleSub.position.set(VIEW_W / 2 - this.titleSub.width / 2, 156);
+    this.titleSub.text = '';
     this.title.addChild(this.titleSub);
   }
 
@@ -233,6 +262,7 @@ export class Overlays {
       this.offT += dt;
       this.press.alpha =
         clamp01((this.offT - 1) / 1.2) * 0.85 * (0.9 + 0.1 * Math.sin(this.t * 13));
+      this.press.y = VIEW_H / 2 + 2 * Math.sin(this.t * 1.7); // slow bob invites the eye
     } else {
       this.offT = 0;
     }
@@ -241,6 +271,7 @@ export class Overlays {
     this.hintA = clamp01(this.hintA + (ui.talkHint ? dt / 0.5 : -dt / 0.35));
     this.hint.alpha = this.hintA * 0.8 * (0.92 + 0.08 * Math.sin(this.t * 5));
     this.hint.visible = this.hintA > 0.01;
+    this.hint.y = 196 + 2 * Math.sin(this.t * 1.7 + 1.3);
 
     // Note falls off the monitor when stickyNote flips false (boot thunk).
     if (ui.stickyNote) {
@@ -274,6 +305,9 @@ export class Overlays {
       this.cardT = Math.min(1, this.cardT + dt / 0.55);
       this.card.y = lerp(VIEW_H + 12, 26, easeOutCubic(this.cardT));
       if (this.pressAny) this.pressAny.visible = this.t % 1.2 < 0.7;
+      if (this.pressAnyBox)
+        this.pressAnyBox.alpha = 0.1 + 0.1 * (0.5 + 0.5 * Math.sin(this.t * 2.6));
+      if (this.cardRecDot) this.cardRecDot.visible = this.t % 1.8 < 1.0; // slow — still recording
     } else {
       this.cardData = null;
       this.card.visible = false;
@@ -281,11 +315,27 @@ export class Overlays {
 
     // title over dead static
     if (ui.phase === 'title') {
-      if (this.titleT < 0) this.titleT = 0;
+      if (this.titleT < 0) {
+        this.titleT = 0;
+        this.titleSubShown = 0;
+        this.titleSub.text = '';
+      }
       this.titleT += dt;
       this.title.visible = true;
       this.title.alpha = clamp01(this.titleT / 0.6);
-      this.titleSub.alpha = clamp01((this.titleT - 1.4) / 0.8);
+      // 0.3Hz breathe on the wordmark
+      this.titleWord.alpha = 0.9 + 0.1 * Math.sin(this.titleT * Math.PI * 0.6);
+      // TO BE CONTINUED types itself out after the beat
+      if (this.titleT > 1.4) {
+        const shown = Math.min(15, this.titleSubShown + dt * 16);
+        if (Math.floor(shown) !== Math.floor(this.titleSubShown)) {
+          this.titleSub.text = 'TO BE CONTINUED'.slice(0, Math.floor(shown));
+        }
+        this.titleSubShown = shown;
+        this.titleSub.alpha = 1;
+      } else {
+        this.titleSub.alpha = 0;
+      }
     } else {
       this.titleT = -1;
       this.title.visible = false;

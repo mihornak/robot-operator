@@ -1,7 +1,9 @@
 /**
  * The robot — wheels + body + 8-dir head, the only saturated thing on screen.
- * Data-driven micro-tweens: bob, tread roll, bump squash, sulk hop, flee lean,
- * damage parts, powerdown slump.
+ * Data-driven micro-tweens: bob, tread roll, travel lean (underdamped spring —
+ * overshoot wobble on stop for free), chassis rumble, turn-anticipation squash,
+ * idle micro-glances, eased camera ack (fast in / slow out), staggered damage
+ * drama, powerup ceremony (head 360 + hop + spark ring), powerdown tragedy.
  */
 
 import { Container, Sprite, type Texture } from 'pixi.js';
@@ -19,6 +21,18 @@ function headIndex(rad: number): number {
   return ((Math.round(rad / (Math.PI / 4)) % 8) + 8) % 8;
 }
 
+/** Shortest signed arc between two head indices, in [-4, 4). */
+function headArc(d: number): number {
+  return ((((d % 8) + 12) % 8) - 4);
+}
+
+/** Overshoots past 1 (~1.1) then settles — the slump "bounce". */
+function easeOutBack(t: number): number {
+  const c = 1.7;
+  const u = t - 1;
+  return 1 + (c + 1) * u * u * u + c * u * u;
+}
+
 /** Per-chip shoulder nubs — code-drawn HERE (render-owned, not art manifest).
  *  Dull accents only; the amber ZAP tip is the sole hot pixel. */
 const NUBS: Record<ChipId, { x: number; w: number; h: number; draw: (ctx: CanvasRenderingContext2D) => void }> = {
@@ -31,6 +45,15 @@ const NUBS: Record<ChipId, { x: number; w: number; h: number; draw: (ctx: Canvas
 };
 
 const SPIN_S = 1.1; // idle-spin duration: 8 head frames + wobble
+
+// travel-lean spring (underdamped ⇒ stop-overshoot wobble comes for free)
+const LEAN_K = 1600; // ω ≈ 40 rad/s
+const LEAN_D = 28; // ζ ≈ 0.35 → ~2 visible overshoots, dies in ~3 frames
+
+// head swivel rates, frames/s
+const HEAD_RATE = 24; // normal servo turn
+const HEAD_RATE_CAM = 34; // "did you say something?" — snaps to camera
+const HEAD_RATE_RETURN = 6.5; // …then drifts lazily back
 
 export class RobotView {
   readonly container = new Container();
@@ -53,6 +76,11 @@ export class RobotView {
   private flashMs = 0;
   private deathT = -1;
   private smokeT = 0;
+  private puffStage = 0; // death: two scripted puffs, then slow loop
+  private twitchT = 0; // death: one last head twitch
+  private twitched = false;
+  private dmgT = -1; // staggered damage drama clock
+  private dmgStage = 0;
   private partToggle = false;
   private prevMood: RobotState['mood'] = 'ok';
   private wasAlive = true;
@@ -60,6 +88,23 @@ export class RobotView {
   private nubSp = new Map<ChipId, Sprite>();
   private spinT = -1;
   private lastCaption = '';
+  private prevChips = 0;
+  // travel lean springs (px)
+  private leanX = 0;
+  private leanVX = 0;
+  private leanY = 0;
+  private leanVY = 0;
+  // head float index 0..8 (wraps) — render-side ease over sim headFacing
+  private headF = HEAD_S;
+  private camAckPrev = false;
+  private returnT = 0; // slow-return window after camera ack expires
+  private anticT = 0; // turn-anticipation squash timer
+  private prevFacingIdx = HEAD_S;
+  // idle micro-glances
+  private idleT = 0;
+  private glanceCd = 2.2;
+  private glanceT = 0;
+  private glanceOff = 0;
 
   constructor(private art: ArtAtlas, private fx: FxSystem) {
     this.wheelTex = frames(art, 'robot_wheels');
@@ -92,11 +137,13 @@ export class RobotView {
   }
 
   onDamage(rs: RobotState): void {
-    this.flashMs = 90;
-    this.partToggle = !this.partToggle;
-    const part = tex(this.art, this.partToggle ? 'part_plate' : 'part_antenna');
-    this.fx.part(rs.pos.x, rs.pos.y - 8, part);
-    this.fx.spark(rs.pos.x, rs.pos.y - 4, 3);
+    // Staggered so it reads: flash + knockback NOW, part pops at +70ms,
+    // sparks at +120ms (see update()).
+    this.flashMs = 60;
+    this.recoilX = -Math.cos(rs.facing) * 2.2;
+    this.recoilY = -Math.sin(rs.facing) * 2.2;
+    this.dmgT = 0;
+    this.dmgStage = 0;
   }
 
   // ------------------------------------------------------------- per frame
@@ -119,16 +166,90 @@ export class RobotView {
     if (moving) this.wheelPhase += (rs.speed * (fleeing ? 1.5 : 1)) * dt * 0.12;
     this.wheels.texture = this.wheelTex[Math.floor(this.wheelPhase) % this.wheelTex.length]!;
 
+    // travel lean: underdamped spring chases the motion direction — leans INTO
+    // travel while moving, overshoot-wobbles around 0 on stop (the settle).
+    let ltx = 0;
+    let lty = 0;
+    if (moving) {
+      const inv = 1 / speed;
+      ltx = rs.vel.x * inv * 1.6;
+      lty = rs.vel.y * inv * 0.8;
+    }
+    const sdt = Math.min(dt, 1 / 30); // spring stability under frame spikes
+    this.leanVX += (ltx - this.leanX) * LEAN_K * sdt;
+    this.leanVX -= this.leanVX * Math.min(1, LEAN_D * sdt);
+    this.leanX += this.leanVX * sdt;
+    this.leanVY += (lty - this.leanY) * LEAN_K * sdt;
+    this.leanVY -= this.leanVY * Math.min(1, LEAN_D * sdt);
+    this.leanY += this.leanVY * sdt;
+
+    // tiny chassis rumble while rolling, synced to tread phase
+    const rumble = moving ? Math.sin(this.wheelPhase * 5.7) * 0.45 : 0;
+
     // idle bob
     const bob = !moving && rs.alive ? Math.sin(this.t * 4) * 0.5 : 0;
     this.body.texture = this.bodyTex[Math.floor(this.t * 2) % this.bodyTex.length]!;
-    this.body.y = -1 + bob;
+    this.body.y = -1 + bob + rumble;
 
-    // head: camera ack wins, then sulk-away, then sim headFacing
-    let hIdx: number;
-    if (ui.headToCameraMs > 0) hIdx = HEAD_S;
-    else if (rs.mood === 'sulk') hIdx = Math.cos(rs.facing) >= 0 ? HEAD_W : HEAD_E;
-    else hIdx = headIndex(rs.headFacing);
+    // ---- head: eased float index — camera ack wins, then sulk, then sim ----
+    const camAck = ui.headToCameraMs > 0 && rs.alive;
+    if (!camAck && this.camAckPrev) this.returnT = 0.55; // slow drift back
+    this.camAckPrev = camAck;
+    this.returnT = Math.max(0, this.returnT - dt);
+
+    // idle micro-glances: after 2s still, occasional small random looks
+    if (moving || !rs.alive || camAck) {
+      this.idleT = 0;
+      this.glanceT = 0;
+      this.glanceOff = 0;
+    } else {
+      this.idleT += dt;
+      if (this.glanceT > 0) {
+        this.glanceT -= dt;
+        if (this.glanceT <= 0) this.glanceOff = 0;
+      } else if (this.idleT > 2) {
+        this.glanceCd -= dt;
+        if (this.glanceCd <= 0) {
+          this.glanceCd = 1.8 + this.rng() * 2.6;
+          this.glanceOff = (this.rng() < 0.5 ? -1 : 1) * (this.rng() < 0.25 ? 2 : 1);
+          this.glanceT = 0.28 + this.rng() * 0.4;
+        }
+      }
+    }
+
+    let hTarget: number;
+    if (camAck) hTarget = HEAD_S;
+    else if (rs.mood === 'sulk') hTarget = Math.cos(rs.facing) >= 0 ? HEAD_W : HEAD_E;
+    else hTarget = (headIndex(rs.headFacing) + this.glanceOff + 8) % 8;
+
+    // turn snap: >90° body-facing flip → 2-frame anticipation squash first
+    const facIdx = headIndex(rs.facing);
+    if (rs.alive && Math.abs(headArc(facIdx - this.prevFacingIdx)) > 2 && this.anticT <= 0 && this.spinT < 0) {
+      this.anticT = 0.055;
+    }
+    this.prevFacingIdx = facIdx;
+
+    let headSquash = 0;
+    if (!rs.alive) {
+      // dead: head frozen where it was (twitch handled below)
+    } else if (this.anticT > 0) {
+      this.anticT -= dt; // hold frame, wind up
+      headSquash = 1;
+    } else {
+      const d = headArc(hTarget - this.headF);
+      const rate = camAck ? HEAD_RATE_CAM : this.returnT > 0 ? HEAD_RATE_RETURN : HEAD_RATE;
+      const step = rate * dt;
+      this.headF = Math.abs(d) <= step ? hTarget : (this.headF + Math.sign(d) * step + 8) % 8;
+    }
+    let hIdx = Math.round(this.headF) % 8;
+
+    // powerup ceremony: chip installed → head 360 + hop + spark ring
+    if (rs.chips.length > this.prevChips && rs.alive) {
+      this.spinT = 0;
+      this.hop = 1;
+      this.sparkRing(ix, iy - 8);
+    }
+    this.prevChips = rs.chips.length;
 
     // Idle spin — no sim event exists for it, so the idle_spin caption
     // ("ROBOT SPINS…", see shared/voiceLines.ts) is the pragmatic trigger.
@@ -146,9 +267,18 @@ export class RobotView {
         wobble = Math.sin(k * Math.PI * 4) * 0.7;
       }
     }
+
+    // death: one last head twitch at +1.2s
+    if (this.twitchT > 0) {
+      this.twitchT -= dt;
+      hIdx = (hIdx + 1) % 8;
+    }
+
     this.head.texture = this.headTex[hIdx]!;
-    this.head.y = -10 + bob * 0.7;
-    this.body.x = wobble;
+    this.head.scale.set(1 + headSquash * 0.12, 1 - headSquash * 0.2); // servo wind-up
+    this.head.x = this.leanX * 1.3;
+    this.head.y = -10 + bob * 0.7 + rumble * 0.4 + this.leanY * 0.6;
+    this.body.x = wobble + this.leanX;
 
     // chip nubs ride the shoulder line, bobbing with the body
     for (const sp of this.nubSp.values()) sp.visible = false; // restart drops chips
@@ -187,36 +317,108 @@ export class RobotView {
     this.body.blendMode = blend;
     this.head.blendMode = blend;
 
-    // death: powerdown — eye fades, slump, smoke loop
+    // staggered damage drama: flash hit at event, part pop at +70ms, sparks +120ms
+    if (this.dmgT >= 0) {
+      this.dmgT += dt;
+      if (this.dmgStage === 0 && this.dmgT >= 0.07) {
+        this.dmgStage = 1;
+        this.partToggle = !this.partToggle;
+        this.fx.part(ix, iy - 8, tex(this.art, this.partToggle ? 'part_plate' : 'part_antenna'));
+      } else if (this.dmgStage === 1 && this.dmgT >= 0.12) {
+        this.dmgT = -1;
+        this.fx.spark(ix, iy - 4, 4);
+      }
+    }
+
+    // death: powerdown — slow eye fade, slump-bounce, two puffs → smoke loop
     let slump = 0;
     if (!rs.alive) {
-      if (this.deathT < 0) this.deathT = 0;
+      if (this.deathT < 0) {
+        this.deathT = 0;
+        this.puffStage = 0;
+        this.twitched = false;
+      }
       this.deathT += dt;
-      const k = Math.min(1, this.deathT / 0.7);
-      slump = 2 * k;
+      const k = Math.min(1, this.deathT / 0.6); // 600ms eye-light fade
+      slump = 3 * easeOutBack(k); // drops 3px, overshoots, settles
       const fade = Math.floor(lerp(0xff, 0x55, k));
       this.head.tint = (fade << 16) | (fade << 8) | Math.min(0xff, Math.floor(fade * 1.1));
       this.body.tint = (Math.floor(lerp(0xff, 0x88, k)) << 16) | (0x5a << 8) | 0x28;
       this.container.rotation = 0.06 * k;
-      this.smokeT -= dt;
-      if (this.smokeT <= 0) {
-        this.smokeT = 0.6 + this.rng() * 0.4;
-        this.fx.smoke(ix + (this.rng() - 0.5) * 6, iy - 10, 0.8);
+      if (this.puffStage === 0 && this.deathT >= 0.22) {
+        this.puffStage = 1;
+        this.fx.smoke(ix - 2, iy - 10, 0.9);
+      } else if (this.puffStage === 1 && this.deathT >= 0.5) {
+        this.puffStage = 2;
+        this.smokeT = 1.0;
+        this.fx.smoke(ix + 2, iy - 11, 1.1);
+      } else if (this.puffStage === 2) {
+        this.smokeT -= dt;
+        if (this.smokeT <= 0) {
+          this.smokeT = 1.2 + this.rng() * 0.7;
+          this.fx.smoke(ix + (this.rng() - 0.5) * 6, iy - 10, 0.65);
+        }
+      }
+      if (!this.twitched && this.deathT >= 1.2) {
+        this.twitched = true;
+        this.twitchT = 0.13; // the little tragedy's last beat
       }
     } else {
       this.container.rotation = lerp(this.container.rotation, leanTarget, Math.min(1, dt * 10));
     }
 
+    // carry pose: fuse bobs out of phase with the body — visible weight
     this.fuseSp.visible = rs.carrying !== null && rs.alive;
+    if (this.fuseSp.visible) {
+      this.fuseSp.x = this.leanX * 1.5; // weight swings into the motion
+      this.fuseSp.y = -17 + (moving
+        ? Math.sin(this.wheelPhase * 2.8) * 0.5
+        : Math.sin(this.t * 4 - 1.25) * 0.6);
+    }
 
     this.container.position.set(ix + this.recoilX, iy + this.recoilY + hopY + slump);
     this.container.zIndex = iy + 7;
   }
 
+  /** Even ring of sparks bursting outward (chip-install ceremony). */
+  private sparkRing(x: number, y: number): void {
+    const t = frames(this.art, 'fx_spark');
+    for (let i = 0; i < 10; i++) {
+      const a = (i / 10) * Math.PI * 2;
+      this.fx.spawn({
+        x: x + Math.cos(a) * 4,
+        y: y + Math.sin(a) * 3,
+        tex: t,
+        fps: 14,
+        life: 0.38 + this.rng() * 0.12,
+        vx: Math.cos(a) * 55,
+        vy: Math.sin(a) * 38 - 12,
+        grav: 40,
+        fade: true,
+        blend: 'add',
+      });
+    }
+  }
+
   private resetLook(): void {
     this.deathT = -1;
+    this.smokeT = 0;
+    this.puffStage = 0;
+    this.twitchT = 0;
+    this.twitched = false;
+    this.dmgT = -1;
+    this.spinT = -1;
+    this.anticT = 0;
+    this.returnT = 0;
+    this.headF = HEAD_S;
+    this.idleT = 0;
+    this.glanceT = 0;
+    this.glanceOff = 0;
+    this.leanX = this.leanVX = 0;
+    this.leanY = this.leanVY = 0;
     this.head.tint = 0xffffff;
     this.body.tint = 0xffffff;
+    this.head.scale.set(1);
     this.container.rotation = 0;
   }
 }

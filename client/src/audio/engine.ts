@@ -56,6 +56,7 @@ export class WebAudioEngine implements AudioEngine {
   playSfx(name: SfxName, opts?: { volume?: number; rate?: number }): void {
     const ctx = this.ctx;
     if (!ctx) return;
+    this.sweeten(name, opts?.volume ?? 1);
     const cached = this.sfx.get(name);
     if (cached instanceof AudioBuffer) {
       const src = ctx.createBufferSource();
@@ -111,11 +112,13 @@ export class WebAudioEngine implements AudioEngine {
     this.ambientLevel.gain.setTargetAtTime(v, this.ctx.currentTime, 0.2);
   }
 
-  blip(kind: 'teletype' | 'osd' | 'warn'): void {
+  /** 'type' = near-subliminal caption-typewriter tick, far softer than 'teletype'. */
+  blip(kind: 'teletype' | 'osd' | 'warn' | 'type'): void {
     const ctx = this.ctx;
     if (!ctx) return;
     const s = new Synth(ctx, this.sfxBus);
-    if (kind === 'teletype') s.tone('square', 2400, 2200, 0.012, 0.08);
+    if (kind === 'type') s.noise(0.004, 0.03, 'highpass', 5000);
+    else if (kind === 'teletype') s.tone('square', 2400, 2200, 0.012, 0.08);
     else if (kind === 'osd') s.tone('sine', 1040, 1040, 0.05, 0.12);
     else {
       s.tone('square', 660, 660, 0.07, 0.15);
@@ -124,6 +127,23 @@ export class WebAudioEngine implements AudioEngine {
   }
 
   // -------------------------------------------------------------- internals
+
+  /** Synth layers under file-based sfx — never replaces them, only thickens. */
+  private sweeten(name: SfxName, volume: number): void {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    if (name === 'powerup') {
+      // soft sub-thump under the arpeggio — power physically arriving
+      new Synth(ctx, this.sfxBus, volume).tone('sine', 68, 32, 0.32, 0.4, 0.02);
+    } else if (name === 'bump' && Math.random() < 0.6) {
+      // loose-panel rattle: 3 fast filtered noise taps (cosmetic, non-sim random)
+      const s = new Synth(ctx, this.sfxBus, volume);
+      const f = 1700 + Math.random() * 900;
+      s.noise(0.018, 0.1, 'bandpass', f, 2.5, 0.02);
+      s.noise(0.016, 0.07, 'bandpass', f * 1.13, 2.5, 0.055);
+      s.noise(0.014, 0.05, 'bandpass', f * 0.9, 2.5, 0.085);
+    }
+  }
 
   private requireCtx(): AudioContext {
     if (!this.ctx) throw new Error('audio not initialized');
@@ -134,8 +154,29 @@ export class WebAudioEngine implements AudioEngine {
     this.master = ctx.createGain();
     this.master.gain.value = 0.9;
     this.master.connect(ctx.destination);
+
+    // sfx bus → surveillance-speaker shelf (-3dB @ 6k) → master,
+    // plus a convolver-free 60ms slap-back "room" at very low mix
     this.sfxBus = ctx.createGain();
-    this.sfxBus.connect(this.master);
+    const sfxShelf = ctx.createBiquadFilter();
+    sfxShelf.type = 'highshelf';
+    sfxShelf.frequency.value = 6000;
+    sfxShelf.gain.value = -3;
+    this.sfxBus.connect(sfxShelf);
+    sfxShelf.connect(this.master);
+    const slap = ctx.createDelay(0.12);
+    slap.delayTime.value = 0.06;
+    const slapDamp = ctx.createBiquadFilter();
+    slapDamp.type = 'lowpass';
+    slapDamp.frequency.value = 3200;
+    const slapFb = ctx.createGain();
+    slapFb.gain.value = 0.25;
+    const slapWet = ctx.createGain();
+    slapWet.gain.value = 0.07;
+    sfxShelf.connect(slap);
+    slap.connect(slapDamp).connect(slapFb).connect(slap);
+    slap.connect(slapWet).connect(this.master);
+
     this.voiceBus = ctx.createGain();
     this.voiceBus.gain.value = 1.1;
     this.voiceBus.connect(this.master);
@@ -149,6 +190,13 @@ export class WebAudioEngine implements AudioEngine {
     const g50 = ctx.createGain();
     g50.gain.value = 0.015;
     hum50.connect(g50).connect(this.ambientLevel);
+    // very slow ±2 cent drift so long sessions never feel sterile
+    const drift = ctx.createOscillator();
+    drift.frequency.value = 0.05; // one wander every ~20s
+    const driftDepth = ctx.createGain();
+    driftDepth.gain.value = 2; // cents
+    drift.connect(driftDepth).connect(hum50.detune);
+    drift.start();
     const hum100 = ctx.createOscillator();
     hum100.frequency.value = 100;
     const g100 = ctx.createGain();

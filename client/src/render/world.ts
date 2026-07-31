@@ -3,7 +3,7 @@
  * pooled fx. Reads sim state + last-tick events; writes nothing back.
  */
 
-import { Container, Sprite } from 'pixi.js';
+import { Container, Sprite, Texture } from 'pixi.js';
 import type { ArtAtlas, Entity, RenderView, SimEvent } from '@shared/types';
 import { TILE } from '@shared/types';
 import { ART, type ArtName } from '@shared/artManifest';
@@ -11,6 +11,14 @@ import { makeRng } from '@shared/rng';
 import { FxSystem } from './fx';
 import { RobotView } from './robot';
 import { anchorOf, frames, glowTex, hashStr, Interp, lerpColor, tex } from './util';
+
+/** Contact-shadow footprint per grounded entity: [w, h, yOffset]. */
+const SHADOW: Partial<Record<Entity['kind'], readonly [number, number, number]>> = {
+  fusedPrinter: [20, 7, 8],
+  printerInnocent: [15, 6, 6],
+  crate: [18, 6, 8],
+  fuse: [7, 3, 4],
+};
 
 const KIND_ART: Record<Entity['kind'], ArtName> = {
   scrap: 'scrap',
@@ -29,6 +37,8 @@ interface EntView {
   root: Container;
   body: Sprite;
   extra: Sprite | null; // pedestal / glow
+  pool: Sprite | null; // radial light pool (pedestal teal / cable arc light)
+  poolFlash: number; // cable: brief pool surge on each spark burst
   kind: Entity['kind'];
   phase: number; // stable per-id anim phase offset
   rng: () => number;
@@ -57,12 +67,25 @@ export class WorldView {
   private closing = new Set<string>(); // elevators told to shut by elevator_entered
   private elevBRamp = -1; // fuse_inserted glow ramp, -1 idle
   private t = 0;
+  // shared light-pool / contact-shadow textures (created once, pooled per view)
+  private shadowTex: Texture;
+  private poolTealTex: Texture;
+  private poolSparkTex: Texture;
+  private robotShadow: Sprite;
 
   constructor(private art: ArtAtlas) {
     this.fx = new FxSystem(art);
     this.robot = new RobotView(art, this.fx);
     this.entLayer.sortableChildren = true;
     this.entLayer.addChild(this.robot.container);
+    this.shadowTex = glowTex(32, 'rgba(0,0,0,0.85)');
+    this.poolTealTex = glowTex(48, 'rgba(81,125,116,0.6)');
+    this.poolSparkTex = glowTex(56, 'rgba(127,212,255,0.6)');
+    this.robotShadow = new Sprite(this.shadowTex);
+    this.robotShadow.anchor.set(0.5);
+    this.robotShadow.scale.set(20 / 32, 8 / 32);
+    this.robotShadow.alpha = 0.32;
+    this.entLayer.addChild(this.robotShadow);
     this.container.addChild(this.tiles, this.entLayer, this.projLayer, this.fx.container);
   }
 
@@ -177,6 +200,9 @@ export class WorldView {
     }
 
     this.robot.update(sim.robot, view.ui, sim.tick, view.alpha, dt);
+    // contact shadow keeps the robot on the floor through hops and bumps
+    this.robotShadow.position.set(this.robot.container.x, this.robot.container.y + 6);
+    this.robotShadow.zIndex = this.robot.container.zIndex - 0.5;
     this.fx.update(dt);
   }
 
@@ -198,6 +224,17 @@ export class WorldView {
     const shadowTex = tex(this.art, 'tile_shadow');
     const at = (x: number, y: number): boolean => solid[y]?.[x] ?? true;
 
+    // worn walkway: one mostly-open row leans on the painted-stripe variant so
+    // its fragments join into a faded line across the room
+    const openRows: number[] = [];
+    for (let y = 0; y < solid.length; y++) {
+      let n = 0;
+      const row = solid[y]!;
+      for (let x = 0; x < row.length; x++) if (!row[x]) n++;
+      if (n >= 10) openRows.push(y);
+    }
+    const walkRow = openRows.length > 0 ? openRows[Math.floor(rng() * openRows.length)]! : -1;
+
     for (let y = 0; y < solid.length; y++) {
       const row = solid[y]!;
       for (let x = 0; x < row.length; x++) {
@@ -206,7 +243,13 @@ export class WorldView {
           // south-facing solid cells show their wall face, the rest their top
           sp = new Sprite(!at(x, y + 1) ? faceTex[Math.floor(rng() * faceTex.length)] : topTex);
         } else {
-          sp = new Sprite(floorTex[Math.floor(rng() * floorTex.length)]);
+          let fi: number;
+          if (y === walkRow && rng() < 0.8) fi = 1; // stripe, worn through in spots
+          else {
+            const r = rng();
+            fi = r < 0.62 ? 0 : r < 0.94 ? 2 : 3; // drain grates stay rare
+          }
+          sp = new Sprite(floorTex[fi]);
         }
         sp.position.set(x * TILE, y * TILE);
         this.tiles.addChild(sp);
@@ -229,19 +272,48 @@ export class WorldView {
     const [ax, ay] = anchorOf(name);
     body.anchor.set(ax, ay);
     let extra: Sprite | null = null;
+    let pool: Sprite | null = null;
+
+    // contact shadow first — everything else stacks on top of it
+    const shCfg = SHADOW[e.kind];
+    if (shCfg) {
+      const sh = new Sprite(this.shadowTex);
+      sh.anchor.set(0.5);
+      sh.scale.set(shCfg[0] / 32, shCfg[1] / 32);
+      sh.y = shCfg[2];
+      sh.alpha = 0.3;
+      root.addChild(sh);
+    }
 
     if (e.kind === 'crate') {
+      // cool charging pool grounds the pedestal in the dark
+      pool = new Sprite(this.poolTealTex);
+      pool.anchor.set(0.5);
+      pool.blendMode = 'add';
+      pool.scale.set(1.05, 0.5);
+      pool.y = 7;
+      pool.alpha = 0.09;
+      root.addChild(pool);
       extra = new Sprite(tex(this.art, 'pedestal'));
       extra.anchor.set(0.5, 0.5);
       extra.y = 4;
       body.y = -4;
       root.addChild(extra);
+    } else if (e.kind === 'cable') {
+      // blue-white arc light, flickered in updateEntity with the spark frames
+      pool = new Sprite(this.poolSparkTex);
+      pool.anchor.set(0.5);
+      pool.blendMode = 'add';
+      pool.scale.set(1, 0.55);
+      pool.y = 1;
+      pool.alpha = 0.06;
+      root.addChild(pool);
     } else if (e.kind === 'elevatorB') {
-      // warm under-glow, pulses when powered
+      // warm floor pool spilling out of the lit shaft, pulses when powered
       extra = new Sprite(glowTex(48, 'rgba(255,195,107,0.55)'));
       extra.anchor.set(0.5);
       extra.blendMode = 'add';
-      extra.y = 2;
+      extra.y = 4;
       root.addChild(extra);
     }
     root.addChild(body);
@@ -252,6 +324,8 @@ export class WorldView {
       root,
       body,
       extra,
+      pool,
+      poolFlash: 0,
       kind: e.kind,
       phase: (hashStr(e.id) % 1000) / 100,
       rng: makeRng(hashStr(e.id)),
@@ -299,6 +373,23 @@ export class WorldView {
       case 'scrap': {
         const fs = frames(this.art, 'scrap');
         v.body.texture = fs[(t + v.phase) % 1.6 < 0.12 ? 1 : 0]!;
+        // occasional star-glint floats off it — SHINY pulls the eye
+        v.sparkT -= dt;
+        if (v.sparkT <= 0) {
+          v.sparkT = 2.4 + v.rng() * 1.6;
+          this.fx.spawn({
+            x: x + (v.rng() - 0.5) * 5,
+            y: y - 6 - v.rng() * 3,
+            tex: frames(this.art, 'fx_spark'),
+            fps: 10,
+            life: 0.4,
+            vy: -12,
+            fade: true,
+            loop: true,
+            blend: 'add',
+            scale: 0.6,
+          });
+        }
         break;
       }
       case 'crate': {
@@ -316,15 +407,27 @@ export class WorldView {
         } else if (v.extra) {
           v.extra.texture = ped[Math.floor((t + v.phase) * 1.6) % ped.length]!;
         }
+        if (v.pool) {
+          if (e.dead && e.state !== 'open') v.pool.visible = false; // unchosen sibling powers down
+          else v.pool.alpha = 0.06 + 0.05 * (0.5 + 0.5 * Math.sin((t + v.phase) * 5));
+        }
         break;
       }
       case 'cable': {
         const fs = frames(this.art, 'cable');
-        v.body.texture = fs[Math.floor((t + v.phase) * 8) % fs.length]!;
+        const fi = Math.floor((t + v.phase) * 8) % fs.length;
+        v.body.texture = fs[fi]!;
+        v.poolFlash = Math.max(0, v.poolFlash - dt * 3);
         v.sparkT -= dt;
         if (v.sparkT <= 0) {
           v.sparkT = 1.2 + v.rng() * 1.6;
           this.fx.spark(x + (v.rng() - 0.5) * 24, y, 2);
+          v.poolFlash = 1; // danger telegraph: pool surges so it reads room-wide
+        }
+        if (v.pool) {
+          // arc light flickers loosely with the spark frames (frame 2 = big arc)
+          const arc = fi === 2 ? 1 : fi > 0 ? 0.45 : 0;
+          v.pool.alpha = (0.05 + 0.09 * arc + 0.2 * v.poolFlash) * (0.85 + 0.3 * v.rng());
         }
         break;
       }
@@ -391,7 +494,8 @@ export class WorldView {
       // The lit shaft is the GOAL — it must read across the dark room.
       v.extra.visible = powered;
       v.extra.alpha = (0.28 + 0.16 * pulse) * ramp;
-      v.extra.scale.set(1 + 0.06 * pulse);
+      const s = 1 + 0.06 * pulse;
+      v.extra.scale.set(s * 1.4, s * 0.65); // elliptical pool at the threshold
     }
     v.body.tint = powered
       ? lerpColor(0xffffff, 0xffdfae, 0.35 * pulse * ramp)

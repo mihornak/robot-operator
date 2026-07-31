@@ -8,23 +8,41 @@ import type { Px } from './px';
 
 interface Pose {
   dy: number; // whole-body lurch offset
+  bdx?: number; // whole-body x kick (spit recoil)
   pdx: number; // printer torso wobble
   pdy: number;
   hose: number; // hose keyframe 0..3
   jaw: 0 | 1 | 2; // closed | telegraph | spit
+  chomp?: number; // teeth irregularity phase (jaw 0)
 }
 
-/** Hose keyframes — flailing vacuum hose off the right flank. */
+/** Hose keyframes — flailing vacuum hose off the right flank, big whip arc. */
 const HOSE: ReadonlyArray<ReadonlyArray<readonly [number, number]>> = [
-  [[20, 12], [21, 13], [21, 14], [21, 15]], // droop
-  [[20, 11], [21, 11], [21, 10], [21, 9]], // rising
-  [[20, 10], [21, 9], [21, 8], [20, 7]], // whipped up
-  [[20, 12], [21, 12], [21, 13], [20, 14]], // slap down
+  [[20, 12], [21, 13], [21, 14], [21, 15], [20, 16]], // droop, tip curled under
+  [[20, 11], [21, 10], [21, 9], [20, 8], [20, 7]], // rising
+  [[20, 10], [21, 8], [20, 6], [19, 4], [19, 2]], // whipped high over the torso
+  [[20, 13], [21, 14], [21, 15], [20, 16], [19, 17]], // slapped down hard, tip flung forward
+];
+
+/**
+ * Crumpled-paper teeth for the closed jaw — [x, rowBelowSlit, color] per
+ * chomp phase. Ragged and slightly different every frame so the mouth chews.
+ */
+const TEETH: ReadonlyArray<ReadonlyArray<readonly [number, number, string]>> = [
+  [[7, 0, MAT.paper], [9, 0, MAT.paperSh], [11, 0, MAT.paper], [13, 0, MAT.paperSh], [15, 0, MAT.paper]],
+  [[7, 0, MAT.paperSh], [10, 0, MAT.paper], [12, 0, MAT.paperSh], [14, 0, MAT.paper], [8, 1, MAT.paperSh]],
+  [[8, 0, MAT.paper], [9, 0, MAT.paperHi], [11, 0, MAT.paperSh], [14, 0, MAT.paper], [15, 0, MAT.paperSh]],
+  [[7, 0, MAT.paper], [10, 0, MAT.paperSh], [13, 0, MAT.paper], [15, 0, MAT.paperHi], [12, 1, MAT.paperSh]],
 ];
 
 /** 22×18: an office printer FUSED onto a canister vacuum. */
 function drawFused(p: Px, pose: Pose): void {
   const { dy, pdx, pdy, jaw } = pose;
+  const bdx = pose.bdx ?? 0;
+  if (bdx !== 0) {
+    p.ctx.save();
+    p.ctx.translate(bdx, 0); // whole-body recoil kick
+  }
 
   // casters
   p.r(4, 16 + dy, 3, 2, G.g3);
@@ -74,54 +92,60 @@ function drawFused(p: Px, pose: Pose): void {
   // paper-tray jaw with crumpled-paper teeth
   if (jaw === 0) {
     p.hl(6 + px, 8 + py, 10, FOE.maw); // mouth slit
-    p.p(7 + px, 8 + py, MAT.paper);
-    p.p(9 + px, 8 + py, MAT.paperSh);
-    p.p(11 + px, 8 + py, MAT.paper);
-    p.p(13 + px, 8 + py, MAT.paperSh);
-    p.p(15 + px, 8 + py, MAT.paper);
     p.hl(6 + px, 9 + py, 10, FOE.rustSh); // tray lip
+    // ragged teeth — snaggles hang over the lip
+    for (const [tx, ty, c] of TEETH[pose.chomp ?? 0]) p.p(tx + px, 8 + ty + py, c);
   } else if (jaw === 1) {
-    // telegraph: jaw open, wad visible
-    p.r(6 + px, 7 + py, 10, 3, FOE.maw);
+    // telegraph: jaw dropped wide, wad chambered
+    p.r(6 + px, 7 + py, 10, 4, FOE.maw);
     p.p(7 + px, 7 + py, MAT.paper);
     p.p(10 + px, 7 + py, MAT.paperSh);
     p.p(13 + px, 7 + py, MAT.paper);
-    p.p(8 + px, 9 + py, MAT.paperSh);
-    p.p(11 + px, 9 + py, MAT.paper);
-    p.p(14 + px, 9 + py, MAT.paperSh);
-    p.r(10 + px, 8 + py, 3, 2, MAT.paper); // the wad
+    p.p(15 + px, 7 + py, MAT.paperSh);
+    p.p(8 + px, 10 + py, MAT.paperSh);
+    p.p(11 + px, 10 + py, MAT.paper);
+    p.p(14 + px, 10 + py, MAT.paperSh);
+    p.r(10 + px, 8 + py, 4, 2, MAT.paper); // the wad, loaded
     p.p(10 + px, 8 + py, MAT.paperHi);
-    p.hl(6 + px, 10 + py, 10, FOE.rustSh); // dropped tray lip
+    p.p(13 + px, 9 + py, MAT.paperSh);
+    p.hl(6 + px, 11 + py, 10, FOE.rustSh); // dropped tray lip
   } else {
-    // spit: jaw wide, tray slammed down over the canister
-    p.r(5 + px, 7 + py, 12, 4, FOE.maw);
+    // spit: jaw slammed wide open over the canister, wad on the way out
+    p.r(5 + px, 7 + py, 12, 5, FOE.maw);
     p.p(6 + px, 7 + py, MAT.paper);
     p.p(9 + px, 7 + py, MAT.paperSh);
     p.p(12 + px, 7 + py, MAT.paper);
     p.p(15 + px, 7 + py, MAT.paperSh);
-    p.hl(5 + px, 11 + py, 12, FOE.rustSh); // tray as lower jaw
-    p.r(9 + px, 9 + py, 4, 2, MAT.paper); // wad at the mouth edge
+    p.hl(5 + px, 12 + py, 12, FOE.rustSh); // tray as lower jaw, slammed down
+    p.r(9 + px, 9 + py, 5, 2, MAT.paper); // wad bursting out the mouth edge
     p.p(9 + px, 9 + py, MAT.paperHi);
-    p.p(12 + px, 10 + py, MAT.paperSh);
+    p.p(10 + px, 10 + py, MAT.paperHi);
+    p.p(14 + px, 10 + py, MAT.paperSh);
+    p.p(16 + px, 10 + py, MAT.paperSh); // fleck already flying
   }
+
+  if (bdx !== 0) p.ctx.restore();
 }
 
-/** 4-frame lurch-roll cycle. */
+/**
+ * 4-frame lurch-roll cycle — 2px body hop with the torso squashing into the
+ * canister at the peak and stretching on the slam (pdy runs against dy).
+ */
 const LURCH: readonly Pose[] = [
-  { dy: 0, pdx: 0, pdy: 0, hose: 0, jaw: 0 },
-  { dy: 0, pdx: 0, pdy: -1, hose: 1, jaw: 0 },
-  { dy: -1, pdx: 1, pdy: 0, hose: 2, jaw: 0 },
-  { dy: 0, pdx: 1, pdy: 0, hose: 3, jaw: 0 },
+  { dy: 0, pdx: 0, pdy: 0, hose: 0, jaw: 0, chomp: 0 }, // settled
+  { dy: -1, pdx: 0, pdy: 0, hose: 1, jaw: 0, chomp: 1 }, // rising
+  { dy: -2, pdx: 1, pdy: 1, hose: 2, jaw: 0, chomp: 2 }, // peak — torso lags down (squash)
+  { dy: 0, pdx: 1, pdy: -1, hose: 3, jaw: 0, chomp: 3 }, // slam — torso overshoots up (stretch)
 ];
 
 export function drawFusedPrinter(p: Px, frame: number): void {
   drawFused(p, LURCH[frame]);
 }
 
-/** 2 frames: rear-back telegraph, then lunge-and-spit. */
+/** 2 frames: rear-back telegraph, then lunge-and-spit with a 1px recoil kick. */
 const SPIT: readonly Pose[] = [
   { dy: 0, pdx: -1, pdy: -1, hose: 2, jaw: 1 },
-  { dy: 0, pdx: 1, pdy: 0, hose: 0, jaw: 2 },
+  { dy: 0, bdx: -1, pdx: 1, pdy: 0, hose: 3, jaw: 2 },
 ];
 
 export function drawFusedPrinterSpit(p: Px, frame: number): void {
@@ -139,9 +163,10 @@ export function drawPrinterInnocent(p: Px, frame: number): void {
   p.hl(2, 10, 12, G.g4);
   p.vl(14, 5, 5, G.g5);
   p.vl(1, 5, 3, G.g7);
-  // neat paper stack up top
-  p.r(4, 1, 8, 2, MAT.paper);
-  p.hl(4, 1, 8, MAT.paperHi);
+  // neat paper stack up top — tray wiggles 1px on the blink frame: alive, harmless
+  const tw = frame === 1 ? 1 : 0;
+  p.r(4 + tw, 1, 8, 2, MAT.paper);
+  p.hl(4 + tw, 1, 8, MAT.paperHi);
   p.hl(3, 3, 10, G.g2); // feed slot
   // output slot on the front
   p.hl(3, 8, 10, G.g4);

@@ -75,6 +75,11 @@ export function createRenderApp(art: ArtAtlas): RenderApp {
     osd = new Osd(art);
     overlays = new Overlays(art);
     crt = new CrtStack(crtWrap);
+    // tear bands snapshot the WORLD only — the OSD is burned in by the
+    // monitor and never tears
+    crt.attachFeed(app.renderer, world.container);
+    // center pivot so the rare auto-focus "breathe" zoom pulses around center
+    world.container.pivot.set(VIEW_W / 2, VIEW_H / 2);
 
     const feedBg = new Graphics().rect(0, 0, VIEW_W, VIEW_H).fill(0x08090b);
     crtWrap.addChild(
@@ -112,7 +117,15 @@ export function createRenderApp(art: ArtAtlas): RenderApp {
     overlays.update(view.ui, dt);
 
     const f = crt.update(dt, view.ui.danger, view.ui.degrade);
-    world.container.position.set(f.ox, f.oy);
+    // pivot sits at feed center (init) — position carries it back + jitter
+    world.container.position.set(VIEW_W / 2 + f.ox, VIEW_H / 2 + f.oy);
+    world.container.scale.set(f.zoom);
+    // phosphor glow rides the robot — the only bright thing on the feed
+    crt.setGlow(
+      world.robot.container.x + f.ox,
+      world.robot.container.y + f.oy,
+      view.sim.robot.alive,
+    );
 
     if (!f.skip) app.render();
   }

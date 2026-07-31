@@ -143,6 +143,15 @@ export function drawCable(p: Px, frame: number): void {
     p.p(x, y + 1, '#22262c'); // rubber body
     p.p(x, y + 2, G.g1); // contact shadow
   }
+  // scorch soot around the burn-through — the floor remembers every arc
+  p.p(13, 8, G.g1);
+  p.p(14, 8, G.g0);
+  p.p(15, 8, G.g1);
+  p.p(16, 8, G.g0);
+  p.p(17, 8, G.g1);
+  p.p(18, 8, G.g1);
+  p.p(14, 2, G.g1);
+  p.p(17, 2, G.g1);
   // frayed copper ends
   p.p(14, 6, MAT.copper);
   p.p(17, 6, MAT.copper);
@@ -158,6 +167,8 @@ export function drawCable(p: Px, frame: number): void {
     p.p(17, 3, FX.spark);
     p.p(15, 2, FX.spark);
     p.p(16, 7, FX.sparkDim);
+    p.p(13, 2, FX.sparkDim); // big-arc frame throws a little wider
+    p.p(18, 5, FX.sparkDim);
   } else if (frame === 3) {
     p.p(16, 3, FX.sparkDim);
     p.p(14, 6, FX.spark); // copper catches the arc

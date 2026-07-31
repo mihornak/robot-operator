@@ -55,14 +55,14 @@ export function drawPaper(p: Px, frame: number): void {
 
 const SPARK_MAP = { C: FX.sparkCore, S: FX.spark, d: FX.sparkDim };
 
-/** fx_spark 8×8 — blue-white 4-frame burst. */
+/** fx_spark 8×8 — blue-white 4-frame burst; hot 2px core on frames 0–1. */
 const SPARK_FRAMES: readonly (readonly string[])[] = [
   [
     '........',
     '........',
-    '...S....',
-    '..SCS...',
-    '...S....',
+    '...SS...',
+    '..SCCS..',
+    '...SS...',
     '........',
     '........',
     '........',
@@ -70,9 +70,9 @@ const SPARK_FRAMES: readonly (readonly string[])[] = [
   [
     '........',
     '...S....',
-    '...C....',
-    '.SCCCS..',
-    '...C....',
+    '...CC...',
+    '.SCCCCS.',
+    '...CC...',
     '...S....',
     '........',
     '........',
@@ -161,7 +161,7 @@ export function drawFxMuzzle(p: Px, frame: number): void {
   p.bmp(0, 0, MUZZLE_FRAMES[frame], MUZZLE_MAP);
 }
 
-/** Debris flecks for the boom — rust/olive shrapnel, deterministic. */
+/** Debris flecks for the boom — rust/olive shrapnel + paper/plastic, deterministic. */
 const DEBRIS: ReadonlyArray<readonly [number, number, string]> = [
   [4, 4, FOE.rust],
   [15, 5, FOE.olive],
@@ -169,6 +169,8 @@ const DEBRIS: ReadonlyArray<readonly [number, number, string]> = [
   [5, 15, FOE.oliveSh],
   [10, 2, FOE.rust],
   [2, 10, FOE.oliveSh],
+  [13, 16, MAT.paper],
+  [7, 3, MAT.metalSh],
 ];
 
 /** fx_boom 20×20 — enemy death pop: flash → smoke ring → dust. No fire. */
@@ -199,6 +201,12 @@ export function drawFxBoom(p: Px, frame: number): void {
     p.p(17, 4, FOE.olive);
     p.p(16, 16, FOE.rustSh);
     p.p(2, 14, FOE.oliveSh);
+    // paper scraps and dark plastic flung through the smoke
+    p.p(18, 7, MAT.paper);
+    p.p(1, 6, MAT.paperSh);
+    p.p(12, 18, MAT.paper);
+    p.p(6, 1, MAT.metalSh);
+    p.p(15, 17, MAT.metalSh);
   } else if (frame === 3) {
     // broken ring of dots
     for (let i = 0; i < 16; i++) {
@@ -210,13 +218,25 @@ export function drawFxBoom(p: Px, frame: number): void {
     }
     p.p(1, 2, FOE.rustSh);
     p.p(18, 15, FOE.oliveSh);
+    // debris flung wide
+    p.p(0, 8, MAT.paperSh);
+    p.p(19, 11, MAT.paper);
+    p.p(10, 0, MAT.paperSh);
+    p.p(4, 18, MAT.metalSh);
+    p.p(16, 1, MAT.metalSh);
+    p.p(19, 18, MAT.paperSh);
   } else {
-    // last dust
+    // last dust + scraps settling low
     p.p(4, 3, FX.smoke1);
     p.p(15, 2, FX.smoke1);
     p.p(18, 9, FX.smoke1);
     p.p(3, 12, FX.smoke1);
     p.p(9, 17, FX.smoke1);
     p.p(12, 6, FX.smoke2);
+    p.p(6, 16, MAT.paperSh);
+    p.p(13, 18, MAT.metalSh);
+    p.p(17, 15, MAT.paperSh);
+    p.p(2, 17, MAT.metalSh);
+    p.p(10, 19, MAT.paperSh);
   }
 }
