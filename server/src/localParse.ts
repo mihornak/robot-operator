@@ -206,5 +206,12 @@ export function serverLocalParse(req: ParseRequest): ParsedCommand {
   if (has(toks, QUESTION_WORDS)) {
     return done({ intent: 'chatter', ack_line: `${name} SEES DARK. AND ${name}.` });
   }
-  return done({ intent: 'clarify', ack_line: 'VOICE IS MUMBLY. AGAIN?' });
+  // Real words we just don't understand: ADMIT it, naming what we heard.
+  // "VOICE IS MUMBLY" is reserved for genuinely empty/garbled input — an
+  // unknown command answered with "mumbly" reads as broken, not funny.
+  const salient = [...toks].sort((a, b) => b.length - a.length)[0];
+  return done({
+    intent: 'clarify',
+    ack_line: salient ? `${name} NOT KNOW ${salient.toUpperCase()}.` : 'VOICE IS MUMBLY. AGAIN?',
+  });
 }

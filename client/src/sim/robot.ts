@@ -57,6 +57,9 @@ function seekPoint(state: SimState, target: Vec): number {
   return moveAndFace(state, norm({ x: target.x - r.pos.x, y: target.y - r.pos.y }));
 }
 
+/** Bump-bump-bump for ~4s (long enough for the scripted gag), then give up. */
+const WALL_STOP_TICKS = 240;
+
 /** wall_bump comedy: throttled — first contact, then every WALL_BUMP_EVERY ticks. */
 function bumpCheck(state: SimState, moved: number, expected: number): void {
   const r = state.robot;
@@ -65,6 +68,12 @@ function bumpCheck(state: SimState, moved: number, expected: number): void {
     r.wallBumpTicks++;
     if (r.wallBumpTicks === 1 || r.wallBumpTicks % WALL_BUMP_EVERY === 0) {
       emit(state, 'wall_bump', undefined, { ticks: r.wallBumpTicks });
+    }
+    if (r.wallBumpTicks >= WALL_STOP_TICKS && r.order) {
+      halt(r);
+      r.order = null;
+      r.wallBumpTicks = 0;
+      emit(state, 'order_blocked', undefined, { reason: 'wall' });
     }
   } else {
     r.wallBumpTicks = 0;

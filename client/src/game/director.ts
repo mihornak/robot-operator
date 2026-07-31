@@ -88,6 +88,7 @@ class Director {
   private awaitingFirstOrder = false; // between "WHAT X DO?" and the first command
   private playerGivenName: string | null = null;
   private ceremony: { options: ChipId[]; floor: number } | null = null;
+  private ceremonyNudged = false;
   private firstBumpDone = false;
   private saidWalkClaim = false;
   private lastBumpBarkAt = 0;
@@ -508,13 +509,17 @@ class Director {
     // The repeat-back — never the transcript.
     this.speech.sayText(cmd.ack_line, 'ack');
 
-    // Ceremony is modal: no driving off mid-question. Refuse, keep the crates.
+    // Ceremony is NOT a jail: driving around is allowed (elevator B stays dark
+    // until a chip is picked, so nothing breaks). The robot just keeps the
+    // question alive with a single "WHICH?" nudge per wander.
     if (
       this.ceremony &&
       ['move', 'goto', 'attack', 'pickup', 'enter_elevator'].includes(cmd.intent)
     ) {
-      this.speech.sayBank('refuse', 'ack');
-      return;
+      if (!this.ceremonyNudged) {
+        this.ceremonyNudged = true;
+        this.speech.sayBank('crate_which', 'idle', 400);
+      }
     }
 
     switch (cmd.intent) {
@@ -592,6 +597,7 @@ class Director {
     const options = TRIADS[floor];
     if (!options) return;
     this.ceremony = { options: [...options], floor };
+    this.ceremonyNudged = false;
     sim.setOrder(this.state, null); // parked — frozen halts enemies, not orders
     this.state.frozen = true;
     this.ui.phase = 'ceremony';
@@ -722,6 +728,7 @@ class Director {
           }
           else if (reason === 'rage') this.speech.sayBank('refuse', 'bark');
           else if (reason === 'tired') this.speech.sayBank('elev_tired', 'bark');
+          else if (reason === 'wall') this.speech.sayBank('wall_move', 'bark');
           else if (reason === 'gone' || reason === 'cant_carry') this.speech.sayBank('refuse', 'bark');
           break;
         }
