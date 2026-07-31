@@ -95,6 +95,15 @@ export const llmOutputSchema = z.object({
   insult: z.boolean().nullish(),
 });
 
+/** Lowercase, strip punctuation, collapse whitespace — ack/utterance compare. */
+function normText(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 /**
  * Validate + normalize model output into a ParsedCommand, with coherence
  * checks against the request (real entity ids, option in triad, tier gating).
@@ -106,6 +115,11 @@ export function toParsedCommand(raw: unknown, req: ParseRequest): ParsedCommand 
   const v = parsed.data;
   const ack = v.ack_line.trim();
   if (!ack) return null;
+  const ackNorm = normText(ack);
+  if (ackNorm.split(' ').length > 8) return null; // toddler-speak cap blown
+  const uttNorm = normText(req.utterance);
+  // verbatim transcript echo is forbidden (CLAUDE.md rule 6)
+  if (uttNorm.split(' ').length >= 3 && ackNorm.includes(uttNorm)) return null;
   const cmd: ParsedCommand = { intent: v.intent, ack_line: ack.toUpperCase(), source: 'llm' };
   if (v.insult) cmd.insult = true;
 

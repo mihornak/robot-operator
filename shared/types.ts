@@ -289,8 +289,10 @@ export interface UiState {
   /** Teletype input line currently being typed ('' = hidden). */
   teletype: string;
   teletypeActive: boolean;
-  /** Sticky note visible (always, phases off/boot excepted). */
+  /** Sticky note visible (pre-boot; falls off on the power-on thunk). */
   stickyNote: boolean;
+  /** "HOLD [SPACE] TO TALK" onboarding hint — director sets ~3s after boot until first PTT. */
+  talkHint: boolean;
   deathCard: DeathCard | null;
   /** Robot head should aim at camera (ack tell), decays in render. */
   headToCameraMs: number;
@@ -307,6 +309,9 @@ export interface RenderView {
   ui: UiState;
   /** Interpolation 0..1 between previous and current sim tick. */
   alpha: number;
+  /** ALL sim events since the last render frame (multiple steps may run per
+   *  frame; sim.events only holds the LAST step's). Render reacts to these. */
+  frameEvents: SimEvent[];
 }
 
 /** One-shot visual effects the director can trigger. Implemented by render. */
@@ -357,6 +362,8 @@ export interface AudioEngine {
   playSfx(name: SfxName, opts?: { volume?: number; rate?: number }): void;
   /** Play robot voice MP3 bytes through the radio chain. Resolves when playback ends. */
   playVoiceBytes(bytes: ArrayBuffer): Promise<void>;
+  /** Fetch+decode+play a voice mp3 URL through the radio chain. Throws on 404. */
+  playVoiceUrl(url: string): Promise<void>;
   stopVoice(): void;
   /** Room-tone hum level 0..1. */
   setHum(level: number): void;

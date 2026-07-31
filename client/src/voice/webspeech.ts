@@ -49,14 +49,24 @@ function detectCtor(): RecognitionCtor | null {
   );
 }
 
+/**
+ * Per-press capture state. Handlers close over the session they were created
+ * for and stop() drains only the session it captured — a re-press mid-stop can
+ * never cross wires with the previous press.
+ */
+interface RecSession {
+  rec: RecognitionLike;
+  finals: string[];
+  interim: string;
+  ended: boolean;
+  resolvers: Array<() => void>;
+  peakRms: number;
+}
+
 export class WebSpeechSource implements CommandSource {
   private ctor = detectCtor();
   private _available = this.ctor !== null;
-  private rec: RecognitionLike | null = null;
-  private finals: string[] = [];
-  private interim = '';
-  private ended = false;
-  private endResolvers: Array<() => void> = [];
+  private session: RecSession | null = null;
   private utterCb: ((u: Utterance) => void) | null = null;
 
   // loudness meter (analysis only — recognition uses its own capture)
@@ -65,10 +75,26 @@ export class WebSpeechSource implements CommandSource {
   private srcNode: MediaStreamAudioSourceNode | null = null;
   private analyser: AnalyserNode | null = null;
   private meterTimer: number | null = null;
-  private peakRms = 0;
+  /** Bumped by every startMeter/stopMeter — stale async meter setups bail. */
+  private meterToken = 0;
 
   get available(): boolean {
     return this._available;
+  }
+
+  /**
+   * Pre-warm mic permission + stream during boot (user gesture context) so the
+   * permission prompt doesn't eat the player's first push-to-talk.
+   */
+  async warmup(): Promise<void> {
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) return;
+      if (!this.stream || this.stream.getAudioTracks().every((t) => t.readyState === 'ended')) {
+        this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      }
+    } catch {
+      this._available = false; // mic denied — director falls back to teletype
+    }
   }
 
   onUtterance(cb: (u: Utterance) => void): void {
@@ -77,11 +103,7 @@ export class WebSpeechSource implements CommandSource {
 
   start(): void {
     if (!this.ctor || !this._available) return;
-    this.discardRec();
-    this.finals = [];
-    this.interim = '';
-    this.ended = false;
-    this.peakRms = 0;
+    this.discardSession();
 
     const rec = new this.ctor();
     rec.lang = 'en-US';
@@ -99,6 +121,14 @@ export class WebSpeechSource implements CommandSource {
     } catch {
       /* optional API */
     }
+    const session: RecSession = {
+      rec,
+      finals: [],
+      interim: '',
+      ended: false,
+      resolvers: [],
+      peakRms: 0,
+    };
     rec.onresult = (ev) => {
       const finals: string[] = [];
       let interim = '';
@@ -109,8 +139,8 @@ export class WebSpeechSource implements CommandSource {
         if (r.isFinal) finals.push(alt.transcript);
         else interim += alt.transcript;
       }
-      this.finals = finals;
-      this.interim = interim;
+      session.finals = finals;
+      session.interim = interim;
     };
     rec.onerror = (ev) => {
       // no-speech/aborted just end with empty results; permission kill is final
@@ -119,78 +149,82 @@ export class WebSpeechSource implements CommandSource {
       }
     };
     rec.onend = () => {
-      this.ended = true;
-      const resolvers = this.endResolvers;
-      this.endResolvers = [];
+      session.ended = true;
+      const resolvers = session.resolvers;
+      session.resolvers = [];
       for (const r of resolvers) r();
     };
-    this.rec = rec;
+    this.session = session;
     try {
       rec.start();
     } catch {
       /* already started */
     }
-    void this.startMeter();
+    void this.startMeter(session);
   }
 
   async stop(): Promise<Utterance | null> {
     this.stopMeter();
-    const rec = this.rec;
-    if (!rec) return null;
-    this.rec = null;
+    const session = this.session;
+    if (!session) return null;
+    this.session = null;
     try {
-      rec.stop();
+      session.rec.stop();
     } catch {
       /* never started */
     }
-    if (!this.ended) {
+    if (!session.ended) {
       await new Promise<void>((resolve) => {
         const timer = window.setTimeout(resolve, STOP_WAIT_MS);
-        this.endResolvers.push(() => {
+        session.resolvers.push(() => {
           window.clearTimeout(timer);
           resolve();
         });
       });
     }
-    this.endResolvers = [];
-    rec.onresult = null;
-    rec.onerror = null;
-    rec.onend = null;
+    session.resolvers = [];
+    session.rec.onresult = null;
+    session.rec.onerror = null;
+    session.rec.onend = null;
     try {
-      rec.abort();
+      session.rec.abort();
     } catch {
       /* already dead */
     }
-    const text = this.finals.join(' ').trim() || this.interim.trim();
+    const text = session.finals.join(' ').trim() || session.interim.trim();
     if (!text) return null;
-    const u: Utterance = { text, shouted: this.peakRms >= SHOUT_RMS, source: 'speech' };
+    const u: Utterance = { text, shouted: session.peakRms >= SHOUT_RMS, source: 'speech' };
     return u;
   }
 
   // -------------------------------------------------------------- loudness
 
-  private async startMeter(): Promise<void> {
+  private async startMeter(session: RecSession): Promise<void> {
+    const token = ++this.meterToken;
     try {
       if (!navigator.mediaDevices?.getUserMedia) return;
       const tracks = this.stream?.getAudioTracks() ?? [];
       if (!this.stream || tracks.every((t) => t.readyState === 'ended')) {
         // cached between presses — permission prompt only on the first PTT
-        this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        this.stream = stream; // cache even when superseded — next press reuses it
+        if (token !== this.meterToken) return; // newer session / stopMeter won
       }
       if (!this.ac) this.ac = new AudioContext();
       if (this.ac.state !== 'running') void this.ac.resume().catch(() => {});
       this.srcNode = this.ac.createMediaStreamSource(this.stream);
-      this.analyser = this.ac.createAnalyser();
-      this.analyser.fftSize = 1024;
-      this.srcNode.connect(this.analyser);
-      const data = new Float32Array(this.analyser.fftSize);
+      const analyser = this.ac.createAnalyser();
+      analyser.fftSize = 1024;
+      this.srcNode.connect(analyser);
+      this.analyser = analyser;
+      const data = new Float32Array(analyser.fftSize);
+      if (this.meterTimer !== null) window.clearInterval(this.meterTimer);
       this.meterTimer = window.setInterval(() => {
-        if (!this.analyser) return;
-        this.analyser.getFloatTimeDomainData(data);
+        analyser.getFloatTimeDomainData(data);
         let sum = 0;
         for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
         const rms = Math.sqrt(sum / data.length);
-        if (rms > this.peakRms) this.peakRms = rms;
+        if (rms > session.peakRms) session.peakRms = rms;
       }, METER_INTERVAL_MS);
     } catch {
       /* meter is best-effort — shouted stays false */
@@ -198,6 +232,7 @@ export class WebSpeechSource implements CommandSource {
   }
 
   private stopMeter(): void {
+    this.meterToken++; // any in-flight startMeter bails after its await
     if (this.meterTimer !== null) {
       window.clearInterval(this.meterTimer);
       this.meterTimer = null;
@@ -208,15 +243,15 @@ export class WebSpeechSource implements CommandSource {
     // stream tracks intentionally NOT stopped — kept cached for the next press
   }
 
-  private discardRec(): void {
-    const rec = this.rec;
-    if (!rec) return;
-    this.rec = null;
-    rec.onresult = null;
-    rec.onerror = null;
-    rec.onend = null;
+  private discardSession(): void {
+    const session = this.session;
+    if (!session) return;
+    this.session = null;
+    session.rec.onresult = null;
+    session.rec.onerror = null;
+    session.rec.onend = null;
     try {
-      rec.abort();
+      session.rec.abort();
     } catch {
       /* fine */
     }

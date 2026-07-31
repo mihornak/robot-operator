@@ -9,7 +9,7 @@ import { serverLocalParse } from './localParse';
 import { CHIP_IDS, DIRS, INTENTS, toParsedCommand } from './schema';
 
 /** Whole-request deadline (both attempts) — the client ack contract is ≤1.5s. */
-export const PARSE_TIMEOUT_MS = 1800;
+export const PARSE_TIMEOUT_MS = 1400;
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const MODEL = 'google/gemini-2.5-flash-lite';
@@ -65,6 +65,11 @@ ack_line — ALWAYS REQUIRED. ROBOT's repeat-back of what it understood, in ITS 
 - Ambiguous input -> a slight, confident misreading. ROBOT is confident, not accurate.
 - shouted true -> ROBOT complies extra eagerly and the ack shows it ("ROBOT GOES FAST. SO FAST.").
 - personalityChips flavor the ack: RAGE loves fighting, SCARED talks brave while fleeing, MAGNET loves shiny.
+
+ANCHORS (follow exactly):
+- "stop" / "halt" / "wait" / "stay" -> intent "stop" (NEVER clarify): {"intent":"stop","ack_line":"ROBOT STOPS. STOPPING IS EASY."}
+- "the elevator" with both a dead elevator and a working one visible -> target the WORKING one; only target the dead one if the player names it.
+- "the fuse" with both a fuse and a power socket visible -> target the fuse (kind "fuse"), never the socket.
 
 Output ONE JSON object matching the schema. Unused fields null.`;
 

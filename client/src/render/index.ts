@@ -33,7 +33,6 @@ export function createRenderApp(art: ArtAtlas): RenderApp {
   let overlays: Overlays;
   let inited = false;
   let lastNow = -1;
-  let lastTick = -1;
 
   function layout(): void {
     const w = window.innerWidth;
@@ -81,9 +80,9 @@ export function createRenderApp(art: ArtAtlas): RenderApp {
     crtWrap.addChild(
       feedBg,
       world.container,
-      osd.container,
-      crt.fxLayer, // static bursts / roll / boot bloom cover feed + OSD…
-      overlays.container, // …while death card & title sit above dead static
+      crt.fxLayer, // static bursts / roll / boot bloom cover the feed…
+      osd.container, // …but the OSD is burned in by the MONITOR — always on top
+      overlays.container, // death card & title above dead static
       osd.captionLayer, // captions survive the cliffhanger static
     );
 
@@ -104,17 +103,9 @@ export function createRenderApp(art: ArtAtlas): RenderApp {
     const dt = lastNow < 0 ? 1 / 60 : Math.min(0.1, (now - lastNow) / 1000);
     lastNow = now;
 
-    // sim.events is the LAST tick's list — react exactly once per tick
-    if (view.sim.tick !== lastTick) {
-      lastTick = view.sim.tick;
-      for (const ev of view.sim.events) {
-        world.handleEvent(ev, view);
-        if (ev.type === 'robot_damage') {
-          crt.glitchFrame();
-          crt.shake(3, 250);
-        }
-      }
-    }
+    // every sim event since last frame (multiple steps may run per rAF);
+    // robot_damage screen fx come from the director via fx — not here
+    for (const ev of view.frameEvents) world.handleEvent(ev, view);
 
     world.update(view, dt);
     osd.update(view.ui, dt);

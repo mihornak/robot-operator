@@ -10,7 +10,7 @@ import {
   ATTACK_RANGE,
   BOLT_SPEED,
   CABLE_STUN_TICKS,
-  CRATE_REACH,
+  CRATE_NOTICE,
   ELEV_REACH,
   IFRAME_TICKS,
   MAGNET_RADIUS,
@@ -108,7 +108,11 @@ function movesAway(state: SimState, order: Order, hostile: Entity): boolean {
   const r = state.robot;
   let intent: Vec | null = null;
   if (order.kind === 'move') intent = dirToVec(order.dir);
-  else if (order.kind === 'goto' || order.kind === 'enter' || order.kind === 'pickup') {
+  else if (order.kind === 'attack') {
+    // Attacking any live hostile IS engaging; wasting shots on a decoy is not.
+    const t = entityById(state, order.targetId);
+    return t !== null && !t.dead && t.kind !== 'fusedPrinter';
+  } else if (order.kind === 'goto' || order.kind === 'enter' || order.kind === 'pickup') {
     const t = entityById(state, order.targetId);
     if (t) intent = norm({ x: t.pos.x - r.pos.x, y: t.pos.y - r.pos.y });
   }
@@ -194,6 +198,13 @@ function executeOrder(state: SimState, order: Order | null): void {
         halt(r);
         return;
       }
+      if (t.hp === undefined) {
+        // no hp = nothing to shoot at (crate, elevator, socket…)
+        emit(state, 'order_blocked', t.id, { reason: 'cant_hurt' });
+        r.order = null;
+        halt(r);
+        return;
+      }
       if (r.carrying !== null) {
         emit(state, 'order_blocked', t.id, { reason: 'carrying' });
         r.order = null;
@@ -239,6 +250,10 @@ function executeOrder(state: SimState, order: Order | null): void {
         } else if (t.kind === 'scrap') {
           collectScrap(state, t);
           emit(state, 'order_done', t.id);
+        } else if (t.kind === 'fuseSocket' && (r.carrying !== null || t.state === 'filled')) {
+          // "pick up the socket" with fuse in hand = deliver; the proximity
+          // pass does the insertion (SOCKET_REACH > ARRIVE_RADIUS) — success.
+          emit(state, 'order_done', t.id);
         } else {
           emit(state, 'order_blocked', t.id, { reason: 'cant_carry' });
         }
@@ -257,7 +272,9 @@ function executeOrder(state: SimState, order: Order | null): void {
         return;
       }
       const d = dist(r.pos, t.pos);
-      if (d <= ELEV_REACH + 4) {
+      // Stop INSIDE the entry radius (proximity pass fires at ELEV_REACH) —
+      // stopping outside it would strand the robot at the door forever.
+      if (d <= ELEV_REACH - 6) {
         halt(r);
         r.order = null;
         if (t.kind === 'elevatorA') emit(state, 'order_blocked', t.id, { reason: 'tired' });
@@ -319,8 +336,8 @@ export function stepRobot(state: SimState, scratch: RobotScratch): void {
   if (
     scratch.magnetTargetId === null &&
     r.chips.includes('MAGNET') &&
-    order !== null &&
-    (order.kind === 'move' || order.kind === 'goto')
+    !state.frozen && // no shiny-chasing mid-ceremony
+    (order === null || order.kind === 'move' || order.kind === 'goto' || order.kind === 'attack')
   ) {
     let best: Entity | null = null;
     let bestD = MAGNET_RADIUS;
@@ -341,7 +358,14 @@ export function stepRobot(state: SimState, scratch: RobotScratch): void {
   if (scratch.magnetTargetId !== null) {
     const s = entityById(state, scratch.magnetTargetId);
     if (s) {
-      seekPoint(state, s.pos); // pickup itself lands via the proximity pass
+      const d = dist(r.pos, s.pos);
+      const moved = seekPoint(state, s.pos); // pickup itself lands via the proximity pass
+      bumpCheck(state, moved, Math.min(r.speed * DT, d));
+      if (r.wallBumpTicks >= WALL_BUMP_EVERY) {
+        // shiny is behind a wall — give up (scrap stays detour-blacklisted)
+        scratch.magnetTargetId = null;
+        r.wallBumpTicks = 0;
+      }
       easeHead(r);
       return;
     }
@@ -377,7 +401,8 @@ export function proximityTriggers(state: SimState): void {
         if (d <= PICKUP_RADIUS) collectScrap(state, e);
         break;
       case 'crate':
-        if (d <= CRATE_REACH && !aiOf(e).reached) {
+        // frozen-gated: no new ceremony triggers while one is running
+        if (!state.frozen && d <= CRATE_NOTICE && !aiOf(e).reached) {
           aiOf(e).reached = 1; // once per crate
           emit(state, 'crate_reached', e.id);
         }
@@ -393,7 +418,8 @@ export function proximityTriggers(state: SimState): void {
         }
         break;
       case 'elevatorB':
-        if (isElevatorPowered(e) && d <= ELEV_REACH && !aiOf(e).entered) {
+        // frozen-gated: no floor exit mid-ceremony
+        if (!state.frozen && isElevatorPowered(e) && d <= ELEV_REACH && !aiOf(e).entered) {
           aiOf(e).entered = 1;
           halt(r);
           r.order = null;

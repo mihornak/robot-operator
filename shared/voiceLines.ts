@@ -44,6 +44,7 @@ export const VOICE_BANK: BankLine[] = [
   { id: 'elev_tired', text: 'Elevator says no more. Elevator is tired.' },
   { id: 'elev_up', text: 'Robot goes up. Up is good.' },
   { id: 'elev_other', text: 'Other elevator. Robot finds it.' },
+  { id: 'elev_dark', text: 'Elevator is dark. Crates first.' },
   { id: 'forgot_gag', text: 'Who is…? … Oh. Is robot.' },
 
   // --- triads / ceremonies ---

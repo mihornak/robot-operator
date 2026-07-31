@@ -57,6 +57,7 @@ export class TeletypeSource implements CommandSource {
       this.emitChange();
       return true;
     }
+    if (ev.key === ' ' && this._value === '') return false; // space stays PTT until a buffer exists
     if (ev.key.length === 1) {
       if (this._value.length < MAX_LEN) this._value += ev.key;
       this.emitChange();

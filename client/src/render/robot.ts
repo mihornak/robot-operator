@@ -5,10 +5,10 @@
  */
 
 import { Container, Sprite, type Texture } from 'pixi.js';
-import type { ArtAtlas, RobotState, UiState } from '@shared/types';
+import type { ArtAtlas, ChipId, RobotState, UiState } from '@shared/types';
 import { makeRng } from '@shared/rng';
 import type { FxSystem } from './fx';
-import { frames, Interp, lerp, tex } from './util';
+import { canvasTex, frames, Interp, lerp, tex } from './util';
 
 /** robot_head frame order E,SE,S,SW,W,NW,N,NE (screen y-down: +45° = SE). */
 const HEAD_E = 0;
@@ -18,6 +18,19 @@ const HEAD_W = 4;
 function headIndex(rad: number): number {
   return ((Math.round(rad / (Math.PI / 4)) % 8) + 8) % 8;
 }
+
+/** Per-chip shoulder nubs — code-drawn HERE (render-owned, not art manifest).
+ *  Dull accents only; the amber ZAP tip is the sole hot pixel. */
+const NUBS: Record<ChipId, { x: number; w: number; h: number; draw: (ctx: CanvasRenderingContext2D) => void }> = {
+  MAGNET: { x: -7, w: 4, h: 3, draw: (c) => { c.fillStyle = '#c9ced6'; c.fillRect(0, 0, 4, 1); c.fillRect(0, 1, 1, 2); c.fillRect(3, 1, 1, 2); } }, // pale horseshoe
+  RAGE: { x: -4, w: 3, h: 4, draw: (c) => { c.fillStyle = '#a03428'; c.fillRect(2, 0, 1, 4); c.fillRect(1, 1, 1, 3); c.fillRect(0, 3, 1, 1); } }, // dull-red fin
+  SCARED: { x: -1, w: 3, h: 4, draw: (c) => { c.fillStyle = '#7a7d3a'; c.fillRect(1, 0, 1, 1); c.fillRect(0, 1, 3, 2); c.fillRect(1, 3, 1, 1); } }, // olive drop
+  MEMORY: { x: 2, w: 3, h: 3, draw: (c) => { c.fillStyle = '#3aa89e'; c.fillRect(0, 0, 3, 3); c.fillStyle = '#1e6f68'; c.fillRect(1, 1, 1, 1); } }, // teal chip
+  ZAP: { x: 5, w: 1, h: 4, draw: (c) => { c.fillStyle = '#8b9098'; c.fillRect(0, 1, 1, 3); c.fillStyle = '#ffb000'; c.fillRect(0, 0, 1, 1); } }, // antenna, amber tip
+  TOUGH: { x: 7, w: 4, h: 2, draw: (c) => { c.fillStyle = '#9aa2ac'; c.fillRect(0, 0, 4, 1); c.fillStyle = '#6b727c'; c.fillRect(0, 1, 4, 1); } }, // plate edge
+};
+
+const SPIN_S = 1.1; // idle-spin duration: 8 head frames + wobble
 
 export class RobotView {
   readonly container = new Container();
@@ -43,6 +56,10 @@ export class RobotView {
   private partToggle = false;
   private prevMood: RobotState['mood'] = 'ok';
   private wasAlive = true;
+  private nubs = new Container();
+  private nubSp = new Map<ChipId, Sprite>();
+  private spinT = -1;
+  private lastCaption = '';
 
   constructor(private art: ArtAtlas, private fx: FxSystem) {
     this.wheelTex = frames(art, 'robot_wheels');
@@ -58,7 +75,7 @@ export class RobotView {
     this.head.y = -10;
     this.fuseSp.y = -17;
     this.fuseSp.visible = false;
-    this.container.addChild(this.wheels, this.body, this.head, this.fuseSp);
+    this.container.addChild(this.wheels, this.body, this.nubs, this.head, this.fuseSp);
   }
 
   // --------------------------------------------------------------- events
@@ -112,8 +129,42 @@ export class RobotView {
     if (ui.headToCameraMs > 0) hIdx = HEAD_S;
     else if (rs.mood === 'sulk') hIdx = Math.cos(rs.facing) >= 0 ? HEAD_W : HEAD_E;
     else hIdx = headIndex(rs.headFacing);
+
+    // Idle spin — no sim event exists for it, so the idle_spin caption
+    // ("ROBOT SPINS…", see shared/voiceLines.ts) is the pragmatic trigger.
+    if (ui.caption !== this.lastCaption) {
+      this.lastCaption = ui.caption;
+      if (rs.alive && ui.caption.startsWith('ROBOT SPINS')) this.spinT = 0;
+    }
+    let wobble = 0;
+    if (this.spinT >= 0) {
+      this.spinT += dt;
+      const k = this.spinT / SPIN_S;
+      if (k >= 1) this.spinT = -1;
+      else {
+        hIdx = (hIdx + Math.floor(k * 8)) % 8; // one full revolution
+        wobble = Math.sin(k * Math.PI * 4) * 0.7;
+      }
+    }
     this.head.texture = this.headTex[hIdx]!;
     this.head.y = -10 + bob * 0.7;
+    this.body.x = wobble;
+
+    // chip nubs ride the shoulder line, bobbing with the body
+    for (const sp of this.nubSp.values()) sp.visible = false; // restart drops chips
+    for (const chip of rs.chips) {
+      let sp = this.nubSp.get(chip);
+      if (!sp) {
+        const n = NUBS[chip];
+        sp = new Sprite(canvasTex(n.w, n.h, n.draw));
+        sp.anchor.set(0.5, 1);
+        sp.x = n.x;
+        this.nubs.addChild(sp);
+        this.nubSp.set(chip, sp);
+      }
+      sp.visible = true;
+    }
+    this.nubs.position.set(this.body.x, this.body.y - 6);
 
     // sulk 'hmph' hop on mood entry
     if (rs.mood === 'sulk' && this.prevMood !== 'sulk') this.hop = 1;

@@ -108,6 +108,10 @@ const ORDINALS: Record<string, number> = {
   '3': 2,
   last: 2,
 };
+/** Bare number words are picks only in terse utterances or after "number". */
+const NUMBER_WORDS = new Set(['one', 'two', 'three']);
+/** norm() strips apostrophes, so "don't" arrives as "dont". */
+const NEGATIONS = new Set(['dont', 'not', 'never', 'no']);
 
 // ---------------------------------------------------------------- helpers
 
@@ -125,9 +129,12 @@ function isIndifferent(text: string): boolean {
 }
 
 function ordinalIndex(tokens: string[]): number | null {
-  for (const t of tokens) {
-    const i = ORDINALS[t];
-    if (i !== undefined) return i;
+  for (let i = 0; i < tokens.length; i++) {
+    const idx = ORDINALS[tokens[i]];
+    if (idx === undefined) continue;
+    // "the shiny one" must not read as FIRST
+    if (NUMBER_WORDS.has(tokens[i]) && tokens.length > 2 && tokens[i - 1] !== 'number') continue;
+    return idx;
   }
   return null;
 }
@@ -213,6 +220,20 @@ function interpret(
     if (isIndifferent(text)) {
       return { intent: 'robot_choice', ack_line: 'ROBOT PICKS. ROBOT HAS TASTE.' };
     }
+    // ceremony wants a pick — anything unresolvable is an ask-again
+    return { intent: 'clarify', ack_line: 'ROBOT READS AGAIN. LISTEN BETTER.' };
+  }
+
+  // negated verb/dir ("dont go left") must not execute as the command itself.
+  // STOPS deliberately excluded: "no no stop" must still stop.
+  const negIdx = tokens.findIndex((t) => NEGATIONS.has(t));
+  if (
+    negIdx !== -1 &&
+    tokens
+      .slice(negIdx + 1)
+      .some((t) => DIR_WORDS[t] !== undefined || SHOOTS.has(t) || GOTO_VERBS.has(t) || PICKUP_VERBS.has(t))
+  ) {
+    return { intent: 'clarify', ack_line: 'ROBOT HEARD NO-GO. WHICH WAY?' };
   }
 
   if (tokens.some((t) => STOPS.has(t))) return { intent: 'stop', ack_line: 'ROBOT STOPS.' };

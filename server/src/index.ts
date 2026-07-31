@@ -11,6 +11,7 @@ import { existsSync } from 'node:fs';
 import { appendFile, mkdir } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { z } from 'zod';
 import type { ParseRequest } from '../../shared/types';
 import { parseUtterance } from './parse';
 import { parseRequestSchema } from './schema';
@@ -66,16 +67,31 @@ app.post('/api/tts', async (c) => {
   return c.body(result.audio);
 });
 
+/** Loose LogBatch mirror — event items unchecked, count capped. */
+const logBatchSchema = z.object({
+  session: z.string(),
+  events: z.array(z.unknown()).max(200),
+});
+const LOG_MAX_BYTES = 64 * 1024;
+
 app.post('/api/log', async (c) => {
+  const raw = await c.req.text();
+  if (raw.length > LOG_MAX_BYTES) return c.json({ error: 'body too large' }, 413);
   let body: unknown;
   try {
-    body = await c.req.json();
+    body = JSON.parse(raw);
   } catch {
     return c.json({ error: 'invalid json' }, 400);
   }
+  const parsed = logBatchSchema.safeParse(body);
+  if (!parsed.success) return c.json({ error: 'bad LogBatch' }, 400);
   const day = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-  await mkdir(LOGS_DIR, { recursive: true });
-  await appendFile(join(LOGS_DIR, `events-${day}.jsonl`), `${JSON.stringify(body)}\n`);
+  try {
+    await mkdir(LOGS_DIR, { recursive: true });
+    await appendFile(join(LOGS_DIR, `events-${day}.jsonl`), `${JSON.stringify(parsed.data)}\n`);
+  } catch {
+    /* telemetry must never fail the client */
+  }
   return c.body(null, 204);
 });
 

@@ -37,6 +37,7 @@ interface EntView {
   lastX: number;
   lastY: number;
   frameF: number; // elevator door frame, float
+  spitMs: number; // fusedPrinter: spit-frame linger after paper_thrown
   flashMs: number;
   sparkT: number; // cable spark countdown
   seen: boolean;
@@ -101,6 +102,11 @@ export class WorldView {
       case 'scrap_pickup':
         this.fx.glint(rs.pos.x, rs.pos.y - 6);
         break;
+      case 'paper_thrown': {
+        const v = ev.id ? this.views.get(ev.id) : undefined;
+        if (v) v.spitMs = 150;
+        break;
+      }
       case 'fuse_inserted':
         this.elevBRamp = 0;
         break;
@@ -180,6 +186,7 @@ export class WorldView {
     this.builtFloor = floorIndex;
     this.closing.clear();
     this.elevBRamp = -1;
+    this.fx.clear();
     this.tiles.removeChildren().forEach((c) => c.destroy({ children: true }));
     for (const [, v] of this.views) v.root.destroy({ children: true });
     this.views.clear();
@@ -253,6 +260,7 @@ export class WorldView {
       lastX: e.pos.x,
       lastY: e.pos.y,
       frameF: e.kind === 'elevatorB' ? 3 : 0,
+      spitMs: 0,
       flashMs: 0,
       sparkT: 1 + (hashStr(e.id) % 20) / 10,
       seen: true,
@@ -295,9 +303,19 @@ export class WorldView {
       }
       case 'crate': {
         const fs = frames(this.art, 'crate');
-        v.body.texture = fs[e.state === 'open' || e.dead ? 1 : 0]!;
+        const open = e.state === 'open';
+        v.body.texture = fs[open ? 1 : 0]!;
         const ped = frames(this.art, 'pedestal');
-        if (v.extra) v.extra.texture = ped[Math.floor((t + v.phase) * 1.6) % ped.length]!;
+        if (e.dead && !open) {
+          // unchosen sibling: stays shut, powered down
+          v.body.tint = 0x8a8f96;
+          if (v.extra) {
+            v.extra.texture = ped[0]!;
+            v.extra.tint = 0x8a8f96;
+          }
+        } else if (v.extra) {
+          v.extra.texture = ped[Math.floor((t + v.phase) * 1.6) % ped.length]!;
+        }
         break;
       }
       case 'cable': {
@@ -313,9 +331,12 @@ export class WorldView {
       case 'fusedPrinter': {
         const moved = Math.hypot(x - v.lastX, y - v.lastY);
         v.motion += moved * 0.28; // lurch cycle synced to its motion
-        if (e.state === 'telegraph' || e.state === 'spit') {
+        v.spitMs = Math.max(0, v.spitMs - dt * 1000);
+        // sim never has a 'spit' state — release is the paper_thrown event,
+        // so the spit frame lingers on a render-side timer (spitMs)
+        if (v.spitMs > 0 || e.state === 'spit_tel') {
           const fs = frames(this.art, 'fused_printer_spit');
-          v.body.texture = fs[e.state === 'spit' ? 1 : 0]!;
+          v.body.texture = fs[v.spitMs > 0 ? 1 : 0]!;
         } else {
           const fs = frames(this.art, 'fused_printer');
           v.body.texture = fs[Math.floor(v.motion) % fs.length]!;
@@ -351,11 +372,9 @@ export class WorldView {
 
   private updateElevator(e: Entity, v: EntView, dt: number, t: number): void {
     const fs = frames(this.art, 'elevator');
-    // door frames closed→open = 0→3; unknown states drift toward per-kind default
-    let target = e.kind === 'elevatorB' ? 3 : 0;
-    if (e.state === 'open' || e.state === 'opening') target = 3;
-    else if (e.state === 'closed' || e.state === 'closing') target = 0;
-    if (this.closing.has(e.id)) target = 0;
+    // door frames closed→open = 0→3. A ('inert') stays shut; B ('dark'|'lit')
+    // stands open until elevator_entered puts it in `closing`.
+    const target = e.kind === 'elevatorA' || this.closing.has(e.id) ? 0 : 3;
     const d = target - v.frameF;
     const step = 10 * dt;
     v.frameF = Math.abs(d) <= step ? target : v.frameF + Math.sign(d) * step;
@@ -365,15 +384,14 @@ export class WorldView {
       v.body.tint = 0x878c94; // inert spawn shaft
       return;
     }
-    const unpowered =
-      e.state === 'off' || e.state === 'unpowered' || e.state === 'dark' ||
-      e.state === 'needs_fuse' || e.state === 'waiting_fuse';
-    const powered = !unpowered || this.elevBRamp >= 0;
+    const powered = e.state === 'lit' || this.elevBRamp >= 0;
     const ramp = this.elevBRamp >= 0 ? this.elevBRamp : 1;
     const pulse = 0.5 + 0.5 * Math.sin(t * 3 + v.phase);
     if (v.extra) {
+      // The lit shaft is the GOAL — it must read across the dark room.
       v.extra.visible = powered;
-      v.extra.alpha = (0.1 + 0.09 * pulse) * ramp;
+      v.extra.alpha = (0.28 + 0.16 * pulse) * ramp;
+      v.extra.scale.set(1 + 0.06 * pulse);
     }
     v.body.tint = powered
       ? lerpColor(0xffffff, 0xffdfae, 0.35 * pulse * ramp)

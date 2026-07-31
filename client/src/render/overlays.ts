@@ -4,7 +4,7 @@
  * (it's paper taped over the monitor, not part of the feed).
  */
 
-import { Container, Graphics, Sprite, Text, TilingSprite } from 'pixi.js';
+import { Container, Graphics, Sprite, Text, type Texture, TilingSprite } from 'pixi.js';
 import type { ArtAtlas, DeathCard, UiState } from '@shared/types';
 import { VIEW_H, VIEW_W } from '@shared/types';
 import { AMBER, AMBER_DIM, canvasTex, CAVEAT, clamp01, easeOutCubic, frames, lerp, tex, VT323 } from './util';
@@ -23,12 +23,16 @@ export class Overlays {
   private press: Text;
   private offT = 0;
 
+  private hint: Text;
+  private hintA = 0;
+
   private noteText: Text;
 
   private card = new Container();
   private cardData: DeathCard | null = null;
   private cardT = 0;
   private pressAny: Text | null = null;
+  private cardScanTex: Texture;
 
   private title = new Container();
   private titleT = -1;
@@ -45,13 +49,24 @@ export class Overlays {
     this.press.text = 'PRESS [SPACE]';
     this.press.alpha = 0;
 
+    this.hint = vt(12, 0x9a7a2a);
+    this.hint.anchor.set(0.5);
+    this.hint.position.set(VIEW_W / 2, 196); // lower third, above the caption line
+    this.hint.text = 'HOLD [SPACE] TO TALK';
+    this.hint.alpha = 0;
+
+    this.cardScanTex = canvasTex(1, 2, (ctx) => {
+      ctx.fillStyle = 'rgba(0,0,0,0.35)';
+      ctx.fillRect(0, 1, 1, 1);
+    });
+
     this.noteText = this.buildNote();
     this.card.visible = false;
     this.titleSub = vt(13, AMBER_DIM);
     this.buildTitle();
     this.title.visible = false;
 
-    this.container.addChild(this.blackout, this.press, this.card, this.title);
+    this.container.addChild(this.blackout, this.press, this.hint, this.card, this.title);
   }
 
   /** Note is physical paper: crisp above the chunky feed. Set on resize. */
@@ -109,14 +124,7 @@ export class Overlays {
       .roundRect(3, 3, W - 6, H - 6, 3)
       .stroke({ color: AMBER, width: 1, alpha: 0.16 });
 
-    const scan = new TilingSprite({
-      texture: canvasTex(1, 2, (ctx) => {
-        ctx.fillStyle = 'rgba(0,0,0,0.35)';
-        ctx.fillRect(0, 1, 1, 1);
-      }),
-      width: W,
-      height: H,
-    });
+    const scan = new TilingSprite({ texture: this.cardScanTex, width: W, height: H });
     scan.alpha = 0.6;
 
     // robot portrait, dimmed — composed from the art frames
@@ -229,6 +237,11 @@ export class Overlays {
       this.offT = 0;
     }
 
+    // onboarding hint: fades with ui.talkHint, same breathing as PRESS [SPACE]
+    this.hintA = clamp01(this.hintA + (ui.talkHint ? dt / 0.5 : -dt / 0.35));
+    this.hint.alpha = this.hintA * 0.8 * (0.92 + 0.08 * Math.sin(this.t * 5));
+    this.hint.visible = this.hintA > 0.01;
+
     // Note falls off the monitor when stickyNote flips false (boot thunk).
     if (ui.stickyNote) {
       this.noteLayer.visible = true;
@@ -250,9 +263,12 @@ export class Overlays {
     // death card slide-in
     if (ui.deathCard) {
       if (ui.deathCard !== this.cardData) {
+        // lastWords arrive as a NEW object ~900ms in — rebuild the content but
+        // only restart the slide when the card comes up from hidden
+        const fresh = this.cardData === null;
         this.cardData = ui.deathCard;
         this.buildCard(ui.deathCard);
-        this.cardT = 0;
+        if (fresh) this.cardT = 0;
         this.card.visible = true;
       }
       this.cardT = Math.min(1, this.cardT + dt / 0.55);

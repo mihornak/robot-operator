@@ -75,6 +75,15 @@ export class FxSystem {
     });
   }
 
+  /** Recycle every live particle (floor rebuild — old-floor fx must not linger). */
+  clear(): void {
+    for (const p of this.live) {
+      p.sp.visible = false;
+      this.pool.push(p.sp);
+    }
+    this.live.length = 0;
+  }
+
   update(dt: number): void {
     for (let i = this.live.length - 1; i >= 0; i--) {
       const p = this.live[i]!;

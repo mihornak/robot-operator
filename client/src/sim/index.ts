@@ -135,7 +135,9 @@ export function setOrder(state: SimState, order: Order | null): void {
   const r = state.robot;
   r.order = order;
   r.wallBumpTicks = 0;
-  scratchOf(state).rageNotified = false;
+  const scratch = scratchOf(state);
+  scratch.rageNotified = false;
+  scratch.magnetTargetId = null; // a fresh order outranks the shiny detour
   if (order === null) {
     r.vel.x = 0;
     r.vel.y = 0;
@@ -190,13 +192,23 @@ export function visibleEntities(state: SimState): ParseEntity[] {
   return out;
 }
 
-/** Director resolved a triad: siblings die, the chosen crate opens. */
+/** Director resolved a triad: the chosen crate opens, its option-bearing siblings die.
+ *  The optionless crate_EARS never dies as a bystander — only when it IS the choice. */
 export function openCrate(state: SimState, crateId: string): void {
   for (const e of state.entities) {
     if (e.kind !== 'crate' || e.dead) continue;
-    e.dead = true;
-    if (e.id === crateId) e.state = 'open';
+    if (e.id === crateId) {
+      e.dead = true;
+      e.state = 'open';
+    } else if (e.option != null && e.id.startsWith('crate_')) {
+      e.dead = true;
+    }
   }
+}
+
+/** Director hook (resolveCeremony / debug): light elevator B so entry unblocks. */
+export function powerElevatorB(state: SimState): void {
+  for (const e of state.entities) if (e.kind === 'elevatorB') e.state = 'lit';
 }
 
 /** Director hook: robot ignores orders for `ticks` (insult sulk). */

@@ -33,6 +33,8 @@ export const CABLE_STUN_TICKS = 20;
 export const MAGNET_RADIUS = 60;
 export const PICKUP_RADIUS = 14;
 export const CRATE_REACH = 24;
+/** Wider crate proximity — crate_reached (ceremony trigger) fires at notice range. */
+export const CRATE_NOTICE = 70;
 export const ELEV_REACH = 20; // forgiving: driving past the shaft still counts
 export const SOCKET_REACH = 18;
 export const ARRIVE_RADIUS = 12;
@@ -42,6 +44,7 @@ export const SPIT_TELEGRAPH_TICKS = 18;
 export const LURCH_MOVE_TICKS = 30; // 0.5s lurch...
 export const LURCH_PAUSE_TICKS = 18; // ...0.3s pause (menace rhythm)
 export const SPIT_MIN_TICKS = 120; // +0..60 rng jitter ≈ spit every ~2.5s
+export const SPIT_ANIM_TICKS = 8; // post-throw recoil pose (render shows 'spit')
 
 // ---------------------------------------------------------------- scratch
 
@@ -107,7 +110,7 @@ export function nearestHostile(state: SimState): Entity | null {
   return best;
 }
 
-/** Elevator B is powered unless the floor marked it 'dark' (floor 4 fuse gate). */
+/** Elevator B is powered unless the floor marked it 'dark' (floor 4 fuse gate; floors 2/5 triad gate — powerElevatorB lights it). */
 export function isElevatorPowered(e: Entity): boolean {
   return e.state !== 'dark';
 }

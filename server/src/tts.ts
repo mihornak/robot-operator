@@ -7,12 +7,14 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const TTS_TIMEOUT_MS = 3000;
 const MODEL_ID = 'eleven_flash_v2_5';
+/** Bump to invalidate the on-disk cache (voice settings / pipeline changes). */
+const CACHE_V = 1;
 /** Placeholder — voicebank script writes the real id into ../.env. */
 const DEFAULT_VOICE_ID = 'pFZP5JQG7iQjIQuC4Bku';
 const VOICE_SETTINGS = { stability: 0.4, similarity_boost: 0.75, style: 0.45 };
@@ -33,7 +35,7 @@ export async function synthesize(text: string): Promise<TtsResult> {
   const voiceId = process.env.ELEVENLABS_VOICE_ID || DEFAULT_VOICE_ID;
   if (!apiKey) return { ok: false, status: 503, error: 'ELEVENLABS_API_KEY missing' };
 
-  const hash = createHash('sha1').update(`${voiceId}:${text}`).digest('hex');
+  const hash = createHash('sha1').update(`${CACHE_V}:${MODEL_ID}:${voiceId}:${text}`).digest('hex');
   const file = join(CACHE_DIR, `${hash}.mp3`);
   if (existsSync(file)) {
     return { ok: true, audio: toArrayBuffer(await readFile(file)), cached: true };
@@ -63,7 +65,10 @@ export async function synthesize(text: string): Promise<TtsResult> {
     if (audio.byteLength === 0) return { ok: false, status: 502, error: 'empty audio' };
     try {
       await mkdir(CACHE_DIR, { recursive: true });
-      await writeFile(file, Buffer.from(audio));
+      // tmp+rename: a concurrent request must never read a half-written mp3
+      const tmp = join(CACHE_DIR, `${hash}.${process.pid}.${Date.now()}.tmp`);
+      await writeFile(tmp, Buffer.from(audio));
+      await rename(tmp, file);
     } catch {
       // cache write failure must not fail the request
     }

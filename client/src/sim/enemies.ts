@@ -15,6 +15,7 @@ import {
   LURCH_PAUSE_TICKS,
   PAPER_SPEED,
   ROBOT_R,
+  SPIT_ANIM_TICKS,
   SPIT_MIN_TICKS,
   SPIT_TELEGRAPH_TICKS,
   aiOf,
@@ -70,7 +71,15 @@ export function stepEnemies(state: SimState, scratch: RobotScratch): void {
         });
         emit(state, 'paper_thrown', e.id);
         ai.spitIn = SPIT_MIN_TICKS + Math.floor(roll(state) * 60);
+        e.state = 'spit'; // render contract: real spit pose after the throw
+        ai.spitAnim = SPIT_ANIM_TICKS - 1; // throw tick counts as the first
       }
+      continue;
+    }
+    // post-throw recoil: hold the spit pose, then resume chase/pause
+    if (ai.spitAnim > 0) {
+      ai.spitAnim--;
+      e.state = 'spit';
       continue;
     }
     ai.spitIn--;
@@ -98,11 +107,12 @@ export function stepEnemies(state: SimState, scratch: RobotScratch): void {
       }
     }
 
-    // contact damage + knockback (i-frames gate both)
+    // contact damage + knockback (i-frames gate both; TOUGH halves the shove)
     if (dist(e.pos, r.pos) <= CONTACT_RANGE) {
       const push = norm({ x: r.pos.x - e.pos.x, y: r.pos.y - e.pos.y });
       if (damageRobot(state, scratch, 1, 'enemy')) {
-        moveCircle(state.solid, r.pos, push.x * KNOCKBACK_PX, push.y * KNOCKBACK_PX, ROBOT_R);
+        const kb = r.chips.includes('TOUGH') ? KNOCKBACK_PX / 2 : KNOCKBACK_PX;
+        moveCircle(state.solid, r.pos, push.x * kb, push.y * kb, ROBOT_R);
       }
     }
   }

@@ -18,12 +18,12 @@ const at = (tx: number, ty: number): Vec => ({ x: tx * TILE + TILE / 2, y: ty * 
 
 // ---------------------------------------------------------------- builders
 
-const elevA = (pos: Vec): Entity => ({ id: 'elevA', kind: 'elevatorA', pos, label: 'elevator A', state: 'inert' });
+const elevA = (pos: Vec): Entity => ({ id: 'elevA', kind: 'elevatorA', pos, label: 'dead elevator behind robot', state: 'inert' });
 const elevB = (pos: Vec, dark = false): Entity => ({
   id: 'elevB',
   kind: 'elevatorB',
   pos,
-  label: 'elevator B',
+  label: 'elevator', // THE elevator — the exit; A is labeled dead
   state: dark ? 'dark' : 'lit',
 });
 const scrap = (id: string, pos: Vec): Entity => ({ id, kind: 'scrap', pos, label: 'scrap' });
@@ -60,7 +60,8 @@ const innocent = (id: string, pos: Vec): Entity => ({
 });
 const mop = (id: string, pos: Vec): Entity => ({ id, kind: 'mop', pos, hp: 1, maxHp: 1, label: 'mop' });
 const fuse = (id: string, pos: Vec): Entity => ({ id, kind: 'fuse', pos, label: 'fuse' });
-const socket = (id: string, pos: Vec): Entity => ({ id, kind: 'fuseSocket', pos, label: 'fuse socket', state: 'empty' });
+// Label must NOT contain "fuse" — "grab the fuse" would mis-target the socket.
+const socket = (id: string, pos: Vec): Entity => ({ id, kind: 'fuseSocket', pos, label: 'power socket', state: 'empty' });
 
 // ---------------------------------------------------------------- floors
 
@@ -89,6 +90,7 @@ export const FLOORS: FloorDef[] = [
   },
 
   // Floor 2 (index 1) — first triad, cable across the B approach. A right, B left.
+  // elevB dark until the triad resolves (director calls powerElevatorB) — ceremony is unskippable.
   {
     map: [
       '##############################',
@@ -110,7 +112,7 @@ export const FLOORS: FloorDef[] = [
     ],
     entities: () => [
       elevA(at(27, 8)),
-      elevB(at(2, 8)),
+      elevB(at(2, 8), true),
       crate('crate_MAGNET', at(12, 4), 'MAGNET'),
       crate('crate_RAGE', at(15, 4), 'RAGE'),
       crate('crate_SCARED', at(18, 4), 'SCARED'),
@@ -184,6 +186,7 @@ export const FLOORS: FloorDef[] = [
   },
 
   // Floor 5 (index 4) — second triad, victory lap, no enemies. A left, B right.
+  // elevB dark until the triad resolves (powerElevatorB), same as floor 2.
   {
     map: [
       '##############################',
@@ -205,7 +208,7 @@ export const FLOORS: FloorDef[] = [
     ],
     entities: () => [
       elevA(at(2, 8)),
-      elevB(at(27, 8)),
+      elevB(at(27, 8), true),
       crate('crate_MEMORY', at(12, 5), 'MEMORY'),
       crate('crate_ZAP', at(15, 5), 'ZAP'),
       crate('crate_TOUGH', at(18, 5), 'TOUGH'),

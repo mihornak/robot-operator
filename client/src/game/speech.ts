@@ -22,18 +22,18 @@ export interface SpeechItem {
   gapMs?: number;
 }
 
-interface AudioWithUrl extends AudioEngine {
-  playVoiceUrl?(url: string): Promise<void>;
-}
-
 export class SpeechQueue {
   private queue: SpeechItem[] = [];
   private speaking = false;
   private currentCaption = '';
   private captionUntil = 0;
+  /** Priority of the line currently being voiced (null when silent). */
+  private currentPriority: SpeechPriority | null = null;
+  /** Bumped by clear() — a pump from an older epoch must never touch state again. */
+  private epoch = 0;
 
   constructor(
-    private audio: AudioWithUrl,
+    private audio: AudioEngine,
     private onLineStart?: (text: string) => void,
   ) {}
 
@@ -54,6 +54,15 @@ export class SpeechQueue {
       this.queue = this.queue.filter((q) => q.priority === 'beat' || q.priority === 'ack');
     }
     this.queue.push(item);
+    if (
+      item.priority === 'ack' &&
+      this.speaking &&
+      (this.currentPriority === 'bark' || this.currentPriority === 'idle')
+    ) {
+      // Cut the playing bark/idle so the ack lands now: stopping resolves the
+      // playVoice* promise, the in-flight pump finishes and picks up the ack.
+      this.audio.stopVoice();
+    }
     void this.pump();
   }
 
@@ -67,9 +76,11 @@ export class SpeechQueue {
 
   /** Cut everything (death, phase changes). */
   clear(): void {
+    this.epoch++;
     this.queue = [];
     this.audio.stopVoice();
     this.speaking = false;
+    this.currentPriority = null;
     this.captionUntil = 0;
     this.currentCaption = '';
   }
@@ -78,7 +89,9 @@ export class SpeechQueue {
     if (this.speaking) return;
     const item = this.queue.shift();
     if (!item) return;
+    const epoch = this.epoch;
     this.speaking = true;
+    this.currentPriority = item.priority;
 
     const text = item.bankId ? (BANK_BY_ID[item.bankId]?.text ?? '') : (item.text ?? '');
     const caption = text.toUpperCase();
@@ -88,28 +101,36 @@ export class SpeechQueue {
     const captionMs = 700 + text.length * 55;
     let played = false;
     try {
-      if (!MUTE && item.bankId && this.audio.playVoiceUrl) {
+      if (!MUTE && item.bankId) {
         await this.audio.playVoiceUrl(`./assets/voice/${item.bankId}.mp3`);
         played = true;
       }
     } catch {
       /* fall through to realtime */
     }
+    if (epoch !== this.epoch) return; // clear()ed mid-line; a newer pump owns the mouth
     if (!MUTE && !played && text) {
       try {
         const bytes = await apiTts(text, item.bankId);
+        if (epoch !== this.epoch) return;
         await this.audio.playVoiceBytes(bytes);
         played = true;
       } catch {
         /* caption-only */
       }
+      if (epoch !== this.epoch) return;
     }
     if (!played) {
       await new Promise((r) => setTimeout(r, captionMs));
+      if (epoch !== this.epoch) return;
     }
     this.captionUntil = performance.now() + 350;
-    if (item.gapMs) await new Promise((r) => setTimeout(r, item.gapMs));
+    if (item.gapMs) {
+      await new Promise((r) => setTimeout(r, item.gapMs));
+      if (epoch !== this.epoch) return;
+    }
     this.speaking = false;
+    this.currentPriority = null;
     void this.pump();
   }
 }

@@ -38,6 +38,13 @@ function pick<T>(arr: readonly T[]): T {
   return arr[Math.floor(uiRng() * arr.length)]!;
 }
 
+/** FIRST_MINUTES beat-1 wait ladder: deterministic idles at 5s/10s/20s of silence. */
+const WAIT_LADDER = [
+  { at: 5000, line: 'idle_here' },
+  { at: 10000, line: 'idle_spin' },
+  { at: 20000, line: 'idle_waiting' },
+] as const;
+
 const DID_BY_CAUSE: Record<string, string> = {
   cable: 'DROVE INTO SPICY FLOOR.',
   paper: 'CAUGHT PAPER. WITH FACE.',
@@ -61,7 +68,7 @@ class Director {
     teletype: '',
     teletypeActive: false,
     stickyNote: true, // taped to the monitor before the monitor is even on
-
+    talkHint: false,
     deathCard: null,
     headToCameraMs: 0,
     moodGlyph: '',
@@ -92,6 +99,12 @@ class Director {
   private parsing = false;
   private booting = false;
   private ended = false;
+  /** Bumped on restart/death/cliffhanger — in-flight parses from before are void. */
+  private runEpoch = 0;
+  /** WAIT_LADDER progress; length = exhausted, armed to 0 when a wait begins. */
+  private idleLadderStep: number = WAIT_LADDER.length;
+  private ladderStart = 0;
+  private lastSparkAt = 0;
 
   constructor(private host: HTMLElement) {}
 
@@ -101,7 +114,7 @@ class Director {
     this.render = createRenderApp(art);
     await this.render.init(this.host);
     this.state = sim.initialState((Date.now() % 2147483647) | 0);
-    this.speech = new SpeechQueue(this.audio as never, () => {
+    this.speech = new SpeechQueue(this.audio, () => {
       this.lastIdleAt = performance.now();
     });
 
@@ -171,20 +184,24 @@ class Director {
     const loopBody = (now: number) => {
       const dt = Math.min(100, now - last);
       last = now;
+      const frameEvents: SimEvent[] = [];
       if (this.simRunning()) {
         acc += dt;
         let steps = 0;
         while (acc >= TICK_MS && steps < 5) {
           sim.step(this.state);
+          // Collect BEFORE processEvents — a floor load in there replaces state.events.
+          frameEvents.push(...this.state.events);
           this.processEvents(this.state.events);
           acc -= TICK_MS;
           steps++;
         }
+        if (acc > TICK_MS) acc = TICK_MS; // step cap hit — keep alpha ≤ 1
       } else {
         acc = 0;
       }
       this.updatePresentation(now, dt);
-      this.render.render({ sim: this.state, ui: this.ui, alpha: acc / TICK_MS });
+      this.render.render({ sim: this.state, ui: this.ui, alpha: acc / TICK_MS, frameEvents });
     };
     rafChain();
   }
@@ -254,6 +271,7 @@ class Director {
 
   private startPtt(): void {
     if (this.ui.pttHeld || this.parsing) return;
+    this.ui.talkHint = false;
     this.ui.pttHeld = true;
     this.ui.micState = 'listening';
     this.ui.headToCameraMs = 900;
@@ -276,7 +294,18 @@ class Director {
     const u = await this.speechSource.stop();
     if (!u || !u.text.trim()) {
       this.ui.micState = 'idle';
-      if (this.woken && !this.speech.busy) this.speech.sayBank('mumbly', 'bark');
+      if (!this.woken) {
+        // The robot heard SOMETHING (static counts). Never leave dead air on
+        // the first press — waking on any PTT is the relationship beat.
+        this.wake();
+      } else if (!this.speechSource.available) {
+        // Mic died (permission revoked) — hint the always-working path.
+        this.speech.sayBank('teletype', 'ack');
+        this.teletype.setActive(true);
+        this.ui.teletypeActive = true;
+      } else {
+        this.speech.sayBank('mumbly', 'ack');
+      }
       return;
     }
     await this.handleUtterance(u);
@@ -302,16 +331,26 @@ class Director {
     setTimeout(() => {
       this.ui.stickyNote = false;
     }, 500);
+    // Mic permission prompt now, over the boot flash — not on first PTT.
+    if (this.speechSource instanceof WebSpeechSource) void this.speechSource.warmup();
     setTimeout(() => {
       this.ui.phase = 'play';
       this.setOsd();
       this.audio.setHum(0.5);
       this.lastIdleAt = performance.now();
     }, 1400);
+    // HOLD [SPACE] TO TALK — fades in after ~3s of stillness; one re-show if ignored.
+    setTimeout(() => {
+      if (!this.woken) this.ui.talkHint = true;
+    }, 4400);
+    setTimeout(() => {
+      if (!this.woken) this.ui.talkHint = true;
+    }, 19400);
   }
 
   private wake(): void {
     this.woken = true;
+    this.ui.talkHint = false;
     this.ui.headToCameraMs = 2000;
     this.audio.playSfx('servo');
     this.speech.sayBank('wake_hello', 'beat', 500);
@@ -345,15 +384,22 @@ class Director {
     this.state.robot.name = name;
     this.awaitingName = false;
     this.awaitingFirstOrder = true;
+    this.armWaitLadder();
     this.speech.sayText(`ROBOT IS ${name}. ${name} IS GOOD AT THINGS.`, 'beat', 500);
     this.speech.sayText(`WHAT ${name} DO?`, 'beat');
     logEvent('named', { name });
+  }
+
+  private armWaitLadder(): void {
+    this.idleLadderStep = 0;
+    this.ladderStart = performance.now();
   }
 
   private selfName(): void {
     if (!this.awaitingName) return;
     this.awaitingName = false;
     this.awaitingFirstOrder = true;
+    this.armWaitLadder();
     this.playerGivenName = 'ROBOT';
     this.state.robot.name = 'ROBOT';
     this.speech.sayBank('wake_self_name', 'beat', 500);
@@ -364,8 +410,10 @@ class Director {
   // ---------------------------------------------------------------- utterances → commands
 
   private async handleUtterance(u: Utterance): Promise<void> {
+    this.ui.talkHint = false;
     this.lastUtteranceAt = performance.now();
     this.lastIdleAt = performance.now();
+    if (this.awaitingFirstOrder) this.armWaitLadder();
     this.ui.headToCameraMs = 900;
     logEvent('utterance', { source: u.source, shouted: u.shouted ? 1 : 0 });
 
@@ -375,11 +423,19 @@ class Director {
       return;
     }
 
+    if (this.parsing) {
+      // One parse in flight at a time — overlapping utterances are dropped whole.
+      logEvent('utterance_dropped');
+      return;
+    }
     this.parsing = true;
     this.ui.micState = 'thinking';
+    const epoch = this.runEpoch;
     const cmd = await this.parse(u);
     this.parsing = false;
     this.ui.micState = 'idle';
+    // The world changed under the parse (death/restart/ending) — result is void.
+    if (epoch !== this.runEpoch || !this.simRunning()) return;
     this.apply(cmd);
   }
 
@@ -433,6 +489,15 @@ class Director {
 
     // The repeat-back — never the transcript.
     this.speech.sayText(cmd.ack_line, 'ack');
+
+    // Ceremony is modal: no driving off mid-question. Refuse, keep the crates.
+    if (
+      this.ceremony &&
+      ['move', 'goto', 'attack', 'pickup', 'enter_elevator'].includes(cmd.intent)
+    ) {
+      this.speech.sayBank('refuse', 'ack');
+      return;
+    }
 
     switch (cmd.intent) {
       case 'move':
@@ -509,6 +574,7 @@ class Director {
     const options = TRIADS[floor];
     if (!options) return;
     this.ceremony = { options: [...options], floor };
+    sim.setOrder(this.state, null); // parked — frozen halts enemies, not orders
     this.state.frozen = true;
     this.ui.phase = 'ceremony';
     for (const chip of options) this.speech.sayBank(CHIPS[chip].crateLineId, 'beat', 350);
@@ -525,6 +591,7 @@ class Director {
 
   private resolveCeremony(chip: ChipId): void {
     if (!this.ceremony) return;
+    if (this.ceremony.floor !== this.state.floorIndex + 1) return; // stale ceremony
     const floor = this.ceremony.floor;
     this.ceremony = null;
     sim.openCrate(this.state, `crate_${chip}`);
@@ -540,6 +607,7 @@ class Director {
     }
     this.state.frozen = false;
     this.ui.phase = 'play';
+    sim.powerElevatorB(this.state); // triad done — the way up lights on
     logEvent('ceremony_pick', { floor, chip });
   }
 
@@ -629,8 +697,14 @@ class Director {
         case 'order_blocked': {
           const reason = String(ev.data?.reason ?? '');
           if (reason === 'carrying') this.speech.sayBank('cant_shoot', 'bark');
-          else if (reason === 'no_power') this.speech.sayBank('fuse_need', 'bark');
+          else if (reason === 'no_power') {
+            // Triad floors: the dark shaft means "crates first", not a fuse.
+            const line = TRIADS[this.state.floorIndex + 1] ? 'elev_dark' : 'fuse_need';
+            this.speech.sayBank(line, 'bark');
+          }
           else if (reason === 'rage') this.speech.sayBank('refuse', 'bark');
+          else if (reason === 'tired') this.speech.sayBank('elev_tired', 'bark');
+          else if (reason === 'gone' || reason === 'cant_carry') this.speech.sayBank('refuse', 'bark');
           break;
         }
         case 'chip_flee':
@@ -658,6 +732,10 @@ class Director {
       this.cliffhanger();
       return;
     }
+    // A ceremony abandoned at the doors dies with its floor.
+    this.ceremony = null;
+    this.state.frozen = false;
+    this.ui.phase = 'play';
     this.speech.clear();
     this.audio.playSfx('elevator_ding');
     this.render.fx.staticBurst(450);
@@ -677,6 +755,7 @@ class Director {
   }
 
   private onDeath(cause: string): void {
+    this.runEpoch++;
     this.speech.clear();
     this.audio.playSfx('powerdown');
     this.render.fx.glitchFrame();
@@ -706,12 +785,14 @@ class Director {
 
   private restart(): void {
     if (this.ui.phase === 'boot') return;
+    this.runEpoch++;
     this.speech.clear();
     this.render.fx.deadCam(false);
     this.state = sim.initialState((Date.now() % 2147483647) | 0);
     this.ceremony = null;
     this.awaitingName = false;
     this.awaitingFirstOrder = true;
+    this.armWaitLadder();
     this.firstBumpDone = false;
     this.saidWalkClaim = false;
     this.lowHpSaidFloor = -1;
@@ -730,6 +811,7 @@ class Director {
   private cliffhanger(): void {
     if (this.ended) return;
     this.ended = true;
+    this.runEpoch++;
     this.speech.clear();
     this.ui.phase = 'cliffhanger';
     this.ui.osd = 'CAM 06 · FLOOR 06 · NO SIGNAL';
@@ -764,6 +846,19 @@ class Director {
       this.ui.danger = hostile ? Math.max(0, Math.min(1, 1 - (hostile.dist - 40) / 120)) : 0;
       this.ui.degrade = (1 - r.hp / r.maxHp) * 0.7;
 
+      // Cable ambience — crackle when the spicy floor is near, louder when nearer.
+      if (this.ui.phase === 'play' && now - this.lastSparkAt > 2500) {
+        let nearest = Infinity;
+        for (const e of this.state.entities) {
+          if (e.kind !== 'cable' || e.dead) continue;
+          nearest = Math.min(nearest, Math.hypot(e.pos.x - r.pos.x, e.pos.y - r.pos.y));
+        }
+        if (nearest < 90) {
+          this.lastSparkAt = now;
+          this.audio.playSfx('spark_loop', { volume: 0.15 + 0.55 * (1 - nearest / 90) });
+        }
+      }
+
       // Wall-bump comedy choreography (first time scripted, then random barks).
       if (r.wallBumpTicks > 70 && !this.saidWalkClaim && !this.firstBumpDone) {
         this.saidWalkClaim = true;
@@ -780,13 +875,24 @@ class Director {
 
       // Idle beats — silence is content; dead air is the only bug.
       if (!this.speech.busy && this.ui.danger === 0 && !this.ui.pttHeld && this.woken && !this.awaitingName) {
-        const silence = now - this.lastIdleAt;
-        const threshold = this.awaitingFirstOrder ? 6000 : 16000;
-        if (silence > threshold) {
-          this.lastIdleAt = now;
-          const line = pick(LINE_GROUPS.idle);
-          if (line === 'idle_spin') this.audio.playSfx('spin');
-          this.speech.sayBank(line, 'idle');
+        if (this.awaitingFirstOrder && this.idleLadderStep < WAIT_LADDER.length) {
+          // Beat-1 wait: deterministic ladder first, random idles after.
+          const step = WAIT_LADDER[this.idleLadderStep]!;
+          if (now - this.ladderStart > step.at) {
+            this.idleLadderStep++;
+            this.lastIdleAt = now;
+            if (step.line === 'idle_spin') this.audio.playSfx('spin');
+            this.speech.sayBank(step.line, 'idle');
+          }
+        } else {
+          const silence = now - this.lastIdleAt;
+          const threshold = this.awaitingFirstOrder ? 6000 : 16000;
+          if (silence > threshold) {
+            this.lastIdleAt = now;
+            const line = pick(LINE_GROUPS.idle);
+            if (line === 'idle_spin') this.audio.playSfx('spin');
+            this.speech.sayBank(line, 'idle');
+          }
         }
       }
     } else if (!this.simRunning()) {
