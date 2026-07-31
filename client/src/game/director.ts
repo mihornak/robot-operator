@@ -40,9 +40,9 @@ function pick<T>(arr: readonly T[]): T {
 
 /** FIRST_MINUTES beat-1 wait ladder: deterministic idles at 5s/10s/20s of silence. */
 const WAIT_LADDER = [
-  { at: 5000, line: 'idle_here' },
-  { at: 10000, line: 'idle_spin' },
-  { at: 20000, line: 'idle_waiting' },
+  { at: 10000, line: 'idle_here' },
+  { at: 28000, line: 'idle_spin' },
+  { at: 55000, line: 'idle_waiting' },
 ] as const;
 
 const DID_BY_CAUSE: Record<string, string> = {
@@ -133,6 +133,24 @@ class Director {
 
     window.addEventListener('keydown', (e) => this.onKeyDown(e));
     window.addEventListener('keyup', (e) => this.onKeyUp(e));
+
+    // DEV debug overlay: live STT transcript + errors + parse state (never in prod builds).
+    if (import.meta.env.DEV) {
+      const dbg = document.createElement('div');
+      dbg.style.cssText =
+        'position:fixed;right:8px;bottom:8px;z-index:99;max-width:420px;padding:6px 9px;' +
+        'font:12px/1.5 monospace;color:#7dff9a;background:rgba(0,0,0,0.72);border:1px solid #2c4;' +
+        'pointer-events:none;white-space:pre-wrap;';
+      document.body.appendChild(dbg);
+      const src = this.speechSource instanceof WebSpeechSource ? this.speechSource : null;
+      setInterval(() => {
+        dbg.textContent =
+          `mic: ${this.ui.micState}  avail: ${this.speechSource?.available ?? 'no-src'}\n` +
+          `heard: ${src?.liveTranscript || '—'}\n` +
+          `err: ${src?.lastError || '—'}\n` +
+          `robot heard: ${this.lastHeard}`;
+      }, 100);
+    }
 
     // DEV shortcut: ?floor=N[&name=X][&tier=1] boots straight into a floor.
     if (import.meta.env.DEV) {
@@ -353,18 +371,18 @@ class Director {
     this.ui.talkHint = false;
     this.ui.headToCameraMs = 2000;
     this.audio.playSfx('servo');
-    this.speech.sayBank('wake_hello', 'beat', 500);
-    this.speech.sayBank('wake_sleep', 'beat', 400);
+    // Keep the wake SHORT: hi + the name ask, then wait. Less is more.
+    this.speech.sayBank('wake_hello', 'beat', 600);
     this.speech.sayBank('wake_name_ask', 'beat');
     this.awaitingName = true;
     this.lastIdleAt = performance.now() + 4000; // silence timer starts after the ask
     logEvent('wake');
     // Silent refusal → self-name after 9s of nothing.
     setTimeout(() => {
-      if (this.awaitingName && performance.now() - this.lastUtteranceAt > 8000) {
+      if (this.awaitingName && performance.now() - this.lastUtteranceAt > 11000) {
         this.selfName();
       }
-    }, 9000);
+    }, 12000);
   }
 
   private applyName(raw: string): void {
@@ -886,7 +904,7 @@ class Director {
           }
         } else {
           const silence = now - this.lastIdleAt;
-          const threshold = this.awaitingFirstOrder ? 6000 : 16000;
+          const threshold = this.awaitingFirstOrder ? 25000 : 40000;
           if (silence > threshold) {
             this.lastIdleAt = now;
             const line = pick(LINE_GROUPS.idle);

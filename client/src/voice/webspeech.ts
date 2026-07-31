@@ -69,6 +69,10 @@ export class WebSpeechSource implements CommandSource {
   private session: RecSession | null = null;
   private utterCb: ((u: Utterance) => void) | null = null;
 
+  /** Debug taps (dev overlay): live transcript of the current/last session + last error. */
+  liveTranscript = '';
+  lastError = '';
+
   // loudness meter (analysis only — recognition uses its own capture)
   private ac: AudioContext | null = null;
   private stream: MediaStream | null = null;
@@ -104,23 +108,18 @@ export class WebSpeechSource implements CommandSource {
   start(): void {
     if (!this.ctor || !this._available) return;
     this.discardSession();
+    this.liveTranscript = '';
+    this.lastError = '';
 
     const rec = new this.ctor();
     rec.lang = 'en-US';
     rec.interimResults = true;
     rec.continuous = true;
     rec.maxAlternatives = 1;
-    try {
-      // Chrome 139+ on-device recognition — best-effort, absent elsewhere
-      if ('processLocally' in rec) {
-        const r = rec as unknown as Record<string, unknown>;
-        r.processLocally = true;
-        r.mode = 'command';
-        r.quality = 'command';
-      }
-    } catch {
-      /* optional API */
-    }
+    // NOTE: deliberately NOT setting Chrome 139+'s processLocally — with the
+    // property present but the on-device model not installed, recognition
+    // fails silently every session ("VOICE IS MUMBLY" forever). Cloud
+    // recognition works everywhere the API exists.
     const session: RecSession = {
       rec,
       finals: [],
@@ -141,12 +140,15 @@ export class WebSpeechSource implements CommandSource {
       }
       session.finals = finals;
       session.interim = interim;
+      this.liveTranscript = [...finals, interim].join(' ').trim();
     };
     rec.onerror = (ev) => {
       // no-speech/aborted just end with empty results; permission kill is final
       if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') {
         this._available = false;
       }
+      this.lastError = ev.error;
+      if (import.meta.env.DEV) console.warn('[speech] recognition error:', ev.error);
     };
     rec.onend = () => {
       session.ended = true;

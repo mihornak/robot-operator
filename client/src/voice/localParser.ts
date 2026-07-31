@@ -277,9 +277,16 @@ function interpret(
 
   // target-ish verb with nothing resolvable → in-character ask-again
   if (tokens.some((t) => GOTO_VERBS.has(t) || PICKUP_VERBS.has(t))) {
-    return ctx.tier >= 1
-      ? { intent: 'clarify', ack_line: 'ROBOT SEES NO THING. WHICH THING?' }
-      : { intent: 'clarify', ack_line: 'ROBOT HEARD MAYBE-GO. WHICH WAY?' };
+    if (ctx.tier >= 1) return { intent: 'clarify', ack_line: 'ROBOT SEES NO THING. WHICH THING?' };
+    // Tier 0: name the unknown word — the limitation must be crystal clear.
+    const noise = new Set(['the', 'a', 'an', 'to', 'go', 'at', 'that', 'this', 'it', 'over']);
+    const noun = [...tokens]
+      .reverse()
+      .find((t) => !noise.has(t) && !GOTO_VERBS.has(t) && !PICKUP_VERBS.has(t));
+    return {
+      intent: 'clarify',
+      ack_line: noun ? `ROBOT NOT KNOW ${noun.toUpperCase()}.` : 'ROBOT HEARD MAYBE-GO. WHICH WAY?',
+    };
   }
 
   if (insult) return { intent: 'chatter', ack_line: 'VOICE IS MEAN. ROBOT SULKS NOW.' };
