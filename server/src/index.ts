@@ -1,0 +1,92 @@
+/**
+ * ROBOT OPERATOR server — Hono on :PORT (default 8790).
+ * /api/parse (OpenRouter + local fallback), /api/tts (ElevenLabs + disk
+ * cache), /api/log (JSONL), /api/health, and ../client/dist static in prod.
+ */
+
+import { serve } from '@hono/node-server';
+import { serveStatic } from '@hono/node-server/serve-static';
+import { Hono } from 'hono';
+import { existsSync } from 'node:fs';
+import { appendFile, mkdir } from 'node:fs/promises';
+import { dirname, join, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import type { ParseRequest } from '../../shared/types';
+import { parseUtterance } from './parse';
+import { parseRequestSchema } from './schema';
+import { synthesize } from './tts';
+
+const SERVER_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
+const LOGS_DIR = join(SERVER_DIR, 'logs');
+const CLIENT_DIST = join(SERVER_DIR, '..', 'client', 'dist');
+
+const app = new Hono();
+
+app.get('/api/health', (c) =>
+  c.json({
+    ok: true,
+    llm: Boolean(process.env.OPENROUTER_API_KEY),
+    tts: Boolean(process.env.ELEVENLABS_API_KEY),
+  }),
+);
+
+app.post('/api/parse', async (c) => {
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'invalid json' }, 400);
+  }
+  const parsed = parseRequestSchema.safeParse(body);
+  if (!parsed.success) return c.json({ error: 'bad ParseRequest' }, 400);
+  const req: ParseRequest = parsed.data;
+  const t0 = Date.now();
+  const cmd = await parseUtterance(req);
+  console.log(`[parse] ${cmd.source} ${cmd.intent} ${Date.now() - t0}ms "${cmd.ack_line}"`);
+  return c.json(cmd);
+});
+
+app.post('/api/tts', async (c) => {
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'invalid json' }, 400);
+  }
+  const text =
+    typeof body === 'object' && body !== null && typeof (body as { text?: unknown }).text === 'string'
+      ? ((body as { text: string }).text).trim()
+      : '';
+  if (!text || text.length > 500) return c.json({ error: 'text required, ≤500 chars' }, 400);
+  const result = await synthesize(text);
+  if (!result.ok) return c.json({ error: result.error }, result.status);
+  c.header('Content-Type', 'audio/mpeg');
+  c.header('Cache-Control', 'no-store');
+  c.header('X-Tts-Cache', result.cached ? 'hit' : 'miss');
+  return c.body(result.audio);
+});
+
+app.post('/api/log', async (c) => {
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'invalid json' }, 400);
+  }
+  const day = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  await mkdir(LOGS_DIR, { recursive: true });
+  await appendFile(join(LOGS_DIR, `events-${day}.jsonl`), `${JSON.stringify(body)}\n`);
+  return c.body(null, 204);
+});
+
+// Production: serve the built client. Dev uses the vite proxy instead.
+if (existsSync(CLIENT_DIST)) {
+  app.use('/*', serveStatic({ root: relative(process.cwd(), CLIENT_DIST) }));
+}
+
+const port = Number(process.env.PORT) || 8790;
+serve({ fetch: app.fetch, port }, (info) => {
+  console.log(
+    `robot-operator server on :${info.port} (llm=${Boolean(process.env.OPENROUTER_API_KEY)} tts=${Boolean(process.env.ELEVENLABS_API_KEY)} static=${existsSync(CLIENT_DIST)})`,
+  );
+});
