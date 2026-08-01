@@ -6,6 +6,7 @@
 import type { SimState, Vec } from '../../../shared/types';
 import {
   AGGRO_RANGE,
+  SNEAK_AGGRO_FACTOR,
   CABLE_RADIUS,
   CONTACT_RANGE,
   ENEMY_R,
@@ -34,7 +35,13 @@ export function stepEnemies(state: SimState, scratch: RobotScratch): void {
     const toRobot: Vec = { x: r.pos.x - e.pos.x, y: r.pos.y - e.pos.y };
     const d = Math.hypot(toRobot.x, toRobot.y);
 
-    if (!ai.aggro && r.alive && d <= AGGRO_RANGE) ai.aggro = 1; // getting shot also sets aggro (projectiles.ts)
+    // Sneaking (careful order, + a ~6s linger after it completes) is QUIET —
+    // half notice range. Payoff of "sneak to X": don't wake the machine.
+    const quiet =
+      scratch.sneakLingerTicks > 0 ||
+      (r.order !== null && (r.order.kind === 'goto' || r.order.kind === 'pickup') && r.order.careful === true);
+    const notice = quiet ? AGGRO_RANGE * SNEAK_AGGRO_FACTOR : AGGRO_RANGE;
+    if (!ai.aggro && r.alive && d <= notice) ai.aggro = 1; // getting shot also sets aggro (projectiles.ts)
     if (ai.aggro && !ai.spotted) {
       ai.spotted = 1;
       emit(state, 'enemy_spotted', e.id);

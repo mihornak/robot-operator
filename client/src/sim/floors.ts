@@ -38,6 +38,15 @@ const crate = (id: string, pos: Vec, option?: ChipId): Entity => ({
   label: option ? `${option.toLowerCase()} crate` : 'starter crate',
   state: 'closed',
 });
+/** The BRAIN upgrade crate (floor 4) — optionless like crate_EARS; the
+ *  director runs its auto-ceremony on crate_reached. */
+const brainCrate = (pos: Vec): Entity => ({
+  id: 'crate_BRAIN',
+  kind: 'crate',
+  pos,
+  label: 'brain crate',
+  state: 'closed',
+});
 /** The ceremony triad: ONE shiny crate per ceremony floor (2 & 5). The three
  *  chips are offered on the ceremony card, not as separate crates. */
 const triadCrate = (pos: Vec): Entity => ({
@@ -195,6 +204,7 @@ export const FLOORS: FloorDef[] = [
     entities: () => [
       elevA(at(27, 8)),
       elevB(at(2, 8), true),
+      brainCrate(at(24, 8)), // on the A exit lane, like floor 3's EARS crate — unmissable
       socket('socket1', at(2, 5)),
       fuse('fuse1', at(25, 3)),
       printer('printer1', at(19, 7), 4),

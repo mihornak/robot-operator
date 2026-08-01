@@ -6,7 +6,14 @@
  */
 
 import { CHIPS } from '../../shared/content';
-import type { ChipId, Dir, ParsedCommand, ParseEntity, ParseRequest } from '../../shared/types';
+import type {
+  ChipId,
+  Dir,
+  IntentType,
+  ParsedCommand,
+  ParseEntity,
+  ParseRequest,
+} from '../../shared/types';
 
 const DIR_WORDS: Record<string, Dir> = {
   left: 'left',
@@ -52,6 +59,21 @@ const INDIFFERENT = [
 const GREETINGS = ['hello', 'hi', 'hey', 'yo', 'howdy', 'sup'];
 const PRAISE = ['good', 'nice', 'great', 'awesome', 'amazing', 'love', 'best'];
 const QUESTION_WORDS = ['what', 'who', 'where', 'why', 'how'];
+
+// --- BRAIN vocabulary (norm() strips apostrophes: "don't" arrives as "dont") ---
+const HIDE_WORDS = ['hide', 'hides', 'hiding', 'cover', 'vanish'];
+const HIDE_PHRASES = ['take cover', 'get behind', 'go behind'];
+const AVOID_WORDS = ['avoid', 'avoids'];
+const AVOID_PHRASES = ['stay away', 'keep away', 'dont touch', 'dont go near', 'stay clear', 'steer clear'];
+const CAREFUL_WORDS = [
+  'sneak', 'sneaks', 'sneaky', 'careful', 'carefully', 'quiet', 'quietly', 'slowly', 'gently', 'cautious',
+];
+/** "X then Y" / "X and then Y" splitter (text is norm()'d — no punctuation). */
+const THEN_SPLIT = /\s(?:and\s+)?then\s/;
+/** Intents a BRAIN chain may hold (commands only, no meta). */
+const CHAINABLE = new Set<IntentType>([
+  'move', 'stop', 'shoot', 'goto', 'attack', 'pickup', 'enter_elevator', 'hide', 'avoid',
+]);
 
 /** Descriptor → chip, for "the angry one" style picks. */
 const CHIP_HINTS: Record<ChipId, string[]> = {
@@ -157,6 +179,149 @@ function parseTriad(text: string, toks: string[], options: ChipId[], name: strin
   return { intent: 'clarify', ack_line: `${name} READS AGAIN. LISTEN BETTER.` };
 }
 
+/**
+ * One command, BRAIN-aware. depth 0 may split ONE "X then Y" chain via a
+ * single recursive self-call at depth 1 (a third step is dropped, admitted).
+ */
+function interpretCommand(text: string, req: ParseRequest, name: string, depth: number): ParsedCommand {
+  if (depth === 0) {
+    const parts = text.split(THEN_SPLIT).map((p) => p.trim()).filter(Boolean);
+    if (parts.length > 1) {
+      if (!req.brain) return { intent: 'clarify', ack_line: 'PLANS NEED BIGGER BRAIN.' };
+      const primary = interpretCommand(parts[0], req, name, 1);
+      if (!CHAINABLE.has(primary.intent)) return primary;
+      const second = interpretCommand(parts[1], req, name, 1);
+      if (!CHAINABLE.has(second.intent)) return primary;
+      primary.then = second;
+      primary.ack_line =
+        parts.length > 2 ? `${name} HOLDS TWO IDEAS ONLY.` : `${name} HAS PLAN. TWO STEPS.`;
+      return primary;
+    }
+  }
+
+  const toks = text.split(' ').filter(Boolean);
+  const hideAsk = has(toks, HIDE_WORDS) || HIDE_PHRASES.some((p) => text.includes(p));
+  const avoidAsk = has(toks, AVOID_WORDS) || AVOID_PHRASES.some((p) => text.includes(p));
+  const carefulAsk = has(toks, CAREFUL_WORDS);
+
+  // No BRAIN yet: name the limitation, crystal clear.
+  if (!req.brain && (hideAsk || avoidAsk || carefulAsk)) {
+    const word = hideAsk ? 'HIDE' : avoidAsk ? 'AVOID' : 'SNEAK';
+    return { intent: 'clarify', ack_line: `${word}? ${name} BRAIN TOO SMALL.` };
+  }
+
+  if (req.brain && avoidAsk) {
+    const target = matchEntity(toks, req.entities);
+    if (target) {
+      return {
+        intent: 'avoid',
+        target: target.id,
+        ack_line: `${name} AVOIDS ${labelWord(target)}. FOREVER.`,
+      };
+    }
+    return { intent: 'clarify', ack_line: `${name} AVOIDS WHAT? SAY THING.` };
+  }
+  if (req.brain && hideAsk) {
+    return { intent: 'hide', ack_line: `${name} HIDES NOW. NOBODY SEES ${name}.` };
+  }
+
+  const cmd = basicCommand(text, toks, req, name);
+  // careful (BRAIN) rides on movement-ish commands only.
+  if (
+    req.brain &&
+    carefulAsk &&
+    (cmd.intent === 'move' || cmd.intent === 'goto' || cmd.intent === 'pickup')
+  ) {
+    cmd.careful = true;
+    cmd.ack_line = `${name} SNEAKS. VERY QUIET.`;
+  }
+  return cmd;
+}
+
+/** Pre-BRAIN heuristics (dir/stop/help/targets/shoot/chatter), unchanged family. */
+function basicCommand(text: string, toks: string[], req: ParseRequest, name: string): ParsedCommand {
+  const insult = has(toks, INSULT_WORDS);
+  const dir = toks.map((t) => DIR_WORDS[t]).find((d): d is Dir => Boolean(d));
+  const amount = has(toks, STEP_WORDS) ? ('step' as const) : has(toks, BIT_WORDS) ? ('bit' as const) : undefined;
+
+  // "go left a bit and stop" is ONE nudge (the move halts itself) — nudge beats the stop word.
+  if (dir && amount) {
+    return { intent: 'move', dir, amount, ack_line: `${name} GOES ${dir.toUpperCase()}. SMALL ZOOM.` };
+  }
+
+  if (has(toks, STOP_WORDS)) {
+    return { intent: 'stop', ack_line: `${name} STOPS. STOPPING IS EASY.` };
+  }
+
+  if (dir) {
+    const tail = req.shouted ? 'FAST FAST.' : 'ZOOM.';
+    return { intent: 'move', dir, ack_line: `${name} GOES ${dir.toUpperCase()}. ${tail}` };
+  }
+
+  // Help: proud capability listing, tier- and brain-appropriate.
+  if (
+    HELP_PHRASES.some((p) => text.includes(p)) ||
+    (toks.includes('help') && !has(toks, GOTO_VERBS) && !has(toks, PICKUP_VERBS) && !has(toks, ATTACK_VERBS))
+  ) {
+    return {
+      intent: 'chatter',
+      ack_line: req.brain
+        ? `${name} HIDES. AVOIDS. SNEAKS. MAKES PLANS.`
+        : req.tier >= 1
+          ? `${name} GOES TO THINGS. SAY THING.`
+          : `${name} KNOWS GO, STOP, SHOOT.`,
+    };
+  }
+
+  if (req.tier >= 1) {
+    if (has(toks, ENTER_WORDS)) {
+      const elev =
+        req.entities.find((e) => e.kind === 'elevatorB') ??
+        req.entities.find((e) => e.label.toLowerCase().includes('elevator'));
+      if (elev) {
+        return {
+          intent: 'enter_elevator',
+          target: elev.id,
+          ack_line: `${name} RIDES ELEVATOR. UP IS GOOD.`,
+        };
+      }
+    }
+    const target = matchEntity(toks, req.entities);
+    if (target) {
+      const word = labelWord(target);
+      if (has(toks, ATTACK_VERBS)) {
+        return { intent: 'attack', target: target.id, ack_line: `${name} FIGHTS ${word}. PEW PEW.` };
+      }
+      if (has(toks, PICKUP_VERBS)) {
+        return { intent: 'pickup', target: target.id, ack_line: `${name} GRABS ${word}. YES.` };
+      }
+      return { intent: 'goto', target: target.id, ack_line: `${name} GOES TO ${word}. ZOOM.` };
+    }
+  }
+
+  if (has(toks, SHOOT_WORDS)) return { intent: 'shoot', ack_line: 'PEW PEW.' };
+
+  // Tier 0 hearing target-language it cannot grasp yet — that's the joke.
+  if (req.tier === 0 && (has(toks, GOTO_VERBS) || has(toks, ATTACK_VERBS) || has(toks, PICKUP_VERBS))) {
+    return { intent: 'clarify', ack_line: `${name} HEARD BIG WORDS. TRY LEFT?` };
+  }
+
+  if (insult) return { intent: 'chatter', ack_line: 'VOICE IS MEAN. ROBOT SULKS NOW.' };
+  if (has(toks, GREETINGS)) return { intent: 'chatter', ack_line: `HELLO VOICE. ${name} IS HERE.` };
+  if (has(toks, PRAISE)) return { intent: 'chatter', ack_line: `${name} KNOWS. ${name} IS GREAT.` };
+  if (has(toks, QUESTION_WORDS)) {
+    return { intent: 'chatter', ack_line: `${name} SEES DARK. AND ${name}.` };
+  }
+  // Real words we just don't understand: ADMIT it, naming what we heard.
+  // "VOICE IS MUMBLY" is reserved for genuinely empty/garbled input — an
+  // unknown command answered with "mumbly" reads as broken, not funny.
+  const salient = [...toks].sort((a, b) => b.length - a.length)[0];
+  return {
+    intent: 'clarify',
+    ack_line: salient ? `${name} NOT KNOW ${salient.toUpperCase()}.` : 'VOICE IS MUMBLY. AGAIN?',
+  };
+}
+
 export function serverLocalParse(req: ParseRequest): ParsedCommand {
   const text = norm(req.utterance);
   const toks = text.split(' ').filter(Boolean);
@@ -171,79 +336,5 @@ export function serverLocalParse(req: ParseRequest): ParsedCommand {
   if (req.awaitingName) return done(parseName(toks));
   if (req.options && req.options.length > 0) return done(parseTriad(text, toks, req.options, name));
 
-  const dir = toks.map((t) => DIR_WORDS[t]).find((d): d is Dir => Boolean(d));
-  const amount = has(toks, STEP_WORDS) ? ('step' as const) : has(toks, BIT_WORDS) ? ('bit' as const) : undefined;
-
-  // "go left a bit and stop" is ONE nudge (the move halts itself) — nudge beats the stop word.
-  if (dir && amount) {
-    return done({ intent: 'move', dir, amount, ack_line: `${name} GOES ${dir.toUpperCase()}. SMALL ZOOM.` });
-  }
-
-  if (has(toks, STOP_WORDS)) {
-    return done({ intent: 'stop', ack_line: `${name} STOPS. STOPPING IS EASY.` });
-  }
-
-  if (dir) {
-    const tail = req.shouted ? 'FAST FAST.' : 'ZOOM.';
-    return done({ intent: 'move', dir, ack_line: `${name} GOES ${dir.toUpperCase()}. ${tail}` });
-  }
-
-  // Help: proud capability listing, tier-appropriate.
-  if (
-    HELP_PHRASES.some((p) => text.includes(p)) ||
-    (toks.includes('help') && !has(toks, GOTO_VERBS) && !has(toks, PICKUP_VERBS) && !has(toks, ATTACK_VERBS))
-  ) {
-    return done({
-      intent: 'chatter',
-      ack_line: req.tier >= 1 ? `${name} GOES TO THINGS. SAY THING.` : `${name} KNOWS GO, STOP, SHOOT.`,
-    });
-  }
-
-  if (req.tier >= 1) {
-    if (has(toks, ENTER_WORDS)) {
-      const elev =
-        req.entities.find((e) => e.kind === 'elevatorB') ??
-        req.entities.find((e) => e.label.toLowerCase().includes('elevator'));
-      if (elev) {
-        return done({
-          intent: 'enter_elevator',
-          target: elev.id,
-          ack_line: `${name} RIDES ELEVATOR. UP IS GOOD.`,
-        });
-      }
-    }
-    const target = matchEntity(toks, req.entities);
-    if (target) {
-      const word = labelWord(target);
-      if (has(toks, ATTACK_VERBS)) {
-        return done({ intent: 'attack', target: target.id, ack_line: `${name} FIGHTS ${word}. PEW PEW.` });
-      }
-      if (has(toks, PICKUP_VERBS)) {
-        return done({ intent: 'pickup', target: target.id, ack_line: `${name} GRABS ${word}. YES.` });
-      }
-      return done({ intent: 'goto', target: target.id, ack_line: `${name} GOES TO ${word}. ZOOM.` });
-    }
-  }
-
-  if (has(toks, SHOOT_WORDS)) return done({ intent: 'shoot', ack_line: 'PEW PEW.' });
-
-  // Tier 0 hearing target-language it cannot grasp yet — that's the joke.
-  if (req.tier === 0 && (has(toks, GOTO_VERBS) || has(toks, ATTACK_VERBS) || has(toks, PICKUP_VERBS))) {
-    return done({ intent: 'clarify', ack_line: `${name} HEARD BIG WORDS. TRY LEFT?` });
-  }
-
-  if (insult) return done({ intent: 'chatter', ack_line: 'VOICE IS MEAN. ROBOT SULKS NOW.' });
-  if (has(toks, GREETINGS)) return done({ intent: 'chatter', ack_line: `HELLO VOICE. ${name} IS HERE.` });
-  if (has(toks, PRAISE)) return done({ intent: 'chatter', ack_line: `${name} KNOWS. ${name} IS GREAT.` });
-  if (has(toks, QUESTION_WORDS)) {
-    return done({ intent: 'chatter', ack_line: `${name} SEES DARK. AND ${name}.` });
-  }
-  // Real words we just don't understand: ADMIT it, naming what we heard.
-  // "VOICE IS MUMBLY" is reserved for genuinely empty/garbled input — an
-  // unknown command answered with "mumbly" reads as broken, not funny.
-  const salient = [...toks].sort((a, b) => b.length - a.length)[0];
-  return done({
-    intent: 'clarify',
-    ack_line: salient ? `${name} NOT KNOW ${salient.toUpperCase()}.` : 'VOICE IS MUMBLY. AGAIN?',
-  });
+  return done(interpretCommand(text, req, name, 0));
 }

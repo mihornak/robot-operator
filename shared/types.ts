@@ -77,10 +77,11 @@ export type Order =
   | { kind: 'move'; dir: Dir; distancePx?: number } // tier 0: until wall/stop; distancePx = nudge ("a bit", "one step") then order_done
   | { kind: 'stop' }
   | { kind: 'shoot' } // fire at nearest hostile in facing cone, else straight ahead
-  | { kind: 'goto'; targetId: string } // tier 1: straight-line to entity (through hazards — that's the joke)
+  | { kind: 'goto'; targetId: string; careful?: boolean } // tier 1 straight-line; careful (BRAIN) = slow + wide berth around hostiles/hazards
   | { kind: 'attack'; targetId: string }
-  | { kind: 'pickup'; targetId: string }
-  | { kind: 'enter'; targetId: string }; // elevator
+  | { kind: 'pickup'; targetId: string; careful?: boolean }
+  | { kind: 'enter'; targetId: string }
+  | { kind: 'hide' }; // BRAIN: find cover breaking line-of-sight to nearest hostile, go there
 
 export interface RobotState {
   pos: Vec;
@@ -98,6 +99,10 @@ export interface RobotState {
   name: string | null;
   /** True once the MEMORY chip is installed — name persists, gag stops. */
   hasMemory: boolean;
+  /** BRAIN upgrade (floor 4 crate): smart execution — hide/avoid/careful/then-chains. */
+  brain: boolean;
+  /** Standing avoid-list (BRAIN): entity ids the robot routes wide around, persistently. */
+  avoidIds: string[];
   order: Order | null;
   /** 'ok' | 'sulk' (ignores orders ~3s) | 'fleeing' (SCARED). */
   mood: 'ok' | 'sulk' | 'fleeing';
@@ -174,6 +179,8 @@ export type IntentType =
   | 'enter_elevator'
   | 'name_robot' // naming beat; `name` holds the name
   | 'choose' // triad; `choice` holds ChipId
+  | 'hide' // BRAIN: take cover from the nearest hostile
+  | 'avoid' // BRAIN: standing order — route wide around `target` from now on
   | 'robot_choice' // player indifferent — robot picks (director rolls)
   | 'clarify' // parser unsure — ack_line IS the in-character ask-again
   | 'chatter'; // not a command; ack_line is the in-character reply
@@ -183,6 +190,10 @@ export interface ParsedCommand {
   dir?: Dir;
   /** Movement magnitude: 'bit' ≈ 20px, 'step' ≈ 16px, omitted = until wall/stop. */
   amount?: 'bit' | 'step';
+  /** BRAIN: cautious execution ("sneak to X") — slow + wide berth. */
+  careful?: boolean;
+  /** BRAIN: one chained follow-up ("grab the fuse THEN hide") — runs on order_done. */
+  then?: ParsedCommand;
   /** Entity id from ParseRequest.entities. */
   target?: string;
   choice?: ChipId;
@@ -215,6 +226,8 @@ export interface ParseRequest {
   options: ChipId[] | null;
   /** Awaiting the naming answer? */
   awaitingName: boolean;
+  /** BRAIN installed — hide/avoid/careful/then vocabulary live. */
+  brain: boolean;
   /** Visible entities the robot could target. */
   entities: ParseEntity[];
   /** Last few robot lines, for conversational context. */

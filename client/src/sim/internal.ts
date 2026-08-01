@@ -7,7 +7,7 @@
  * function of the call sequence and is never serialized mid-run — a restart
  * always goes through initialState(), which starts from fresh scratch.
  */
-import type { Entity, SimEvent, SimEventType, SimState } from '../../../shared/types';
+import type { Entity, SimEvent, SimEventType, SimState, Vec } from '../../../shared/types';
 import { rngNext } from '../../../shared/rng';
 import { dist } from './physics';
 
@@ -46,6 +46,28 @@ export const LURCH_PAUSE_TICKS = 18; // ...0.3s pause (menace rhythm)
 export const SPIT_MIN_TICKS = 120; // +0..60 rng jitter ≈ spit every ~2.5s
 export const SPIT_ANIM_TICKS = 8; // post-throw recoil pose (render shows 'spit')
 
+// BRAIN (smart execution) tuning.
+/** Cover search: candidate tile centers within this range of the robot. */
+export const HIDE_SEARCH_RADIUS = 110;
+/** careful ("sneak") speed factor while executing goto/pickup. */
+export const CAREFUL_SPEED = 0.75; // still outruns a 30px/s printer (55*0.75=41)
+/** Sneaking is QUIET: enemies notice a careful robot at half range. */
+export const SNEAK_AGGRO_FACTOR = 0.5;
+/** careful: repulsion field range around live hostiles + cables (px past clearance). */
+export const CAREFUL_REPULSE_RADIUS = 60;
+/** avoidIds standing orders: wider repulsion field (px past clearance). */
+export const AVOID_REPULSE_RADIUS = 70;
+/** Repulsion weight at the hazard EDGE, falling linearly to 0 at the field range. */
+export const REPULSE_WEIGHT = 1.2;
+/** Hazard clearance (cable zap r=18, enemy contact r=18): full repulsion holds
+ *  at the danger edge, not the entity center — careful never enters the zone. */
+export const REPULSE_CLEAR = 18;
+/** Tangential fraction of the repulsion: dead-ahead hazards are ORBITED, not
+ *  jittered against (a pure radial field oscillates forever on the axis). */
+export const REPULSE_SWIRL = 0.5;
+/** hide lands ON the cover point (goto's 12px slop could leave LOS leaking). */
+export const HIDE_ARRIVE = 6;
+
 // ---------------------------------------------------------------- scratch
 
 export interface RobotScratch {
@@ -61,6 +83,11 @@ export interface RobotScratch {
   magnetTargetId: string | null;
   /** Px actually traveled under the CURRENT move order (distancePx nudges). */
   moveTraveledPx: number;
+  /** Cover point the CURRENT hide order seeks; computed on the order's first tick. */
+  hideTarget: Vec | null;
+  /** Quiet-posture ticks after a careful order completes — stealth doesn't
+   *  evaporate the instant the robot arrives and loiters in enemy territory. */
+  sneakLingerTicks: number;
 }
 
 export function newScratch(): RobotScratch {
@@ -71,6 +98,8 @@ export function newScratch(): RobotScratch {
     fleeEpisode: false,
     magnetTargetId: null,
     moveTraveledPx: 0,
+    hideTarget: null,
+    sneakLingerTicks: 0,
   };
 }
 

@@ -59,6 +59,8 @@ export function initialState(seed: number): SimState {
       chips: [],
       name: null,
       hasMemory: false,
+      brain: false,
+      avoidIds: [],
       order: null,
       mood: 'ok',
       sulkTicks: 0,
@@ -81,7 +83,9 @@ export function initialState(seed: number): SimState {
 
 /**
  * Load a floor: rebuild grid + entities, robot to elevator A, per-floor state
- * reset. hp/chips/tier/scrap persist; without MEMORY the name does not.
+ * reset. hp/chips/tier/scrap/brain/avoidIds persist; without MEMORY the name
+ * does not. (avoidIds persisting across floors is deliberate — standing orders
+ * outlive dead references; only initialState clears them.)
  */
 export function loadFloor(state: SimState, floorIndex: number): void {
   const def = FLOORS[floorIndex];
@@ -139,6 +143,7 @@ export function setOrder(state: SimState, order: Order | null): void {
   scratch.rageNotified = false;
   scratch.magnetTargetId = null; // a fresh order outranks the shiny detour
   scratch.moveTraveledPx = 0; // nudge distance counts from the fresh order
+  scratch.hideTarget = null; // a fresh hide order picks cover anew
   if (order === null) {
     r.vel.x = 0;
     r.vel.y = 0;
@@ -170,6 +175,18 @@ export function applyChip(state: SimState, chip: ChipId): void {
     case 'MAGNET':
       break; // behavior-only (scrap detour)
   }
+}
+
+/** Install the BRAIN upgrade (floor 4 crate): hide/avoid/careful/then unlocked. */
+export function applyBrain(state: SimState): void {
+  state.robot.brain = true;
+}
+
+/** Standing avoid order (BRAIN): robot routes wide around this entity id from
+ *  now on. Dedup'd; persists across floors, cleared only by initialState. */
+export function addAvoid(state: SimState, id: string): void {
+  const r = state.robot;
+  if (!r.avoidIds.includes(id)) r.avoidIds.push(id);
 }
 
 /** Live entities with rough bearing + distance, for the LLM parse request. */

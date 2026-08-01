@@ -98,6 +98,10 @@ class Director {
   private lastHeard = '…';
   private lastDid = 'WOKE UP.';
   private lowHpSaidFloor = -1;
+  /** BRAIN one-level "X then Y" chain — runs on order_done, voided by any world break. */
+  private pendingThen: ParsedCommand | null = null;
+  /** Kind of the last order the director set — sim nulls robot.order before order_done fires. */
+  private lastOrderKind: Order['kind'] | null = null;
   private parsing = false;
   private booting = false;
   private ended = false;
@@ -164,6 +168,7 @@ class Director {
         this.playerGivenName = (q.get('name') ?? 'SPARKY').toUpperCase();
         this.state.robot.name = this.playerGivenName;
         if (q.get('tier') === '1' || f >= 4) this.state.robot.tier = 1;
+        if (f >= 5) sim.applyBrain(this.state); // BRAIN crate is floor 4
         sim.loadFloor(this.state, f - 1);
         if (!this.state.robot.hasMemory) this.state.robot.name = null;
         this.ui.phase = 'play';
@@ -468,6 +473,7 @@ class Director {
       personality: this.state.robot.chips,
       options: this.ceremony ? this.ceremony.options : null,
       awaitingName: this.awaitingName,
+      brain: this.state.robot.brain,
       entities: sim.visibleEntities(this.state),
       recent: [this.lastHeard],
       shouted: u.shouted,
@@ -493,6 +499,9 @@ class Director {
       refused: 0,
     });
 
+    // A fresh utterance voids any queued "then" from the previous one.
+    this.pendingThen = null;
+
     if (this.awaitingName) {
       if (cmd.intent === 'name_robot' && cmd.name) this.applyName(cmd.name);
       else this.selfName();
@@ -507,7 +516,9 @@ class Director {
         ack_line:
           this.state.robot.tier === 0
             ? 'ROBOT KNOWS GO, STOP, SHOOT.'
-            : 'ROBOT GOES TO THINGS NOW. SAY THING.',
+            : this.state.robot.brain
+              ? 'ROBOT HIDES. AVOIDS. MAKES PLANS.'
+              : 'ROBOT GOES TO THINGS NOW. SAY THING.',
       };
     }
 
@@ -521,6 +532,11 @@ class Director {
 
     // The repeat-back — never the transcript.
     this.speech.sayText(cmd.ack_line, 'ack');
+
+    // BRAIN chain: hold ONE follow-up for order_done. Nested thens are dropped.
+    if (cmd.then && this.state.robot.brain) {
+      this.pendingThen = { ...cmd.then, then: undefined };
+    }
 
     // Ceremony is NOT a jail: driving around is allowed (elevator B stays dark
     // until a chip is picked, so nothing breaks). The robot just keeps the
@@ -572,7 +588,10 @@ class Director {
               : cmd.intent === 'pickup'
                 ? 'pickup'
                 : 'enter';
-        this.setOrder({ kind, targetId: target.id } as Order);
+        const order = { kind, targetId: target.id } as Order;
+        // BRAIN: "sneak/careful" maps onto goto/pickup orders only.
+        if (cmd.careful && (order.kind === 'goto' || order.kind === 'pickup')) order.careful = true;
+        this.setOrder(order);
         this.lastDid =
           cmd.intent === 'attack'
             ? `FOUGHT ${target.label.toUpperCase()}.`
@@ -596,6 +615,22 @@ class Director {
           this.resolveCeremony(chip);
         }
         break;
+      case 'hide':
+        // Pre-BRAIN the parser already turned this into a clarify; belt and
+        // braces — the ack spoke, but no order is set.
+        if (!this.state.robot.brain) break;
+        this.setOrder({ kind: 'hide' });
+        this.lastDid = 'HID.';
+        break;
+      case 'avoid': {
+        if (!this.state.robot.brain) break;
+        const target = cmd.target ? sim.entityById(this.state, cmd.target) : null;
+        if (!target || target.dead) break; // ack already voiced the confusion
+        // Standing order — no order change, the avoid-list rides along forever.
+        sim.addAvoid(this.state, target.id);
+        this.speech.sayBank('avoid_ok', 'bark');
+        break;
+      }
       case 'clarify':
         if (this.ceremony) this.rereadCeremony(false);
         break;
@@ -608,7 +643,14 @@ class Director {
   }
 
   private setOrder(order: Order): void {
+    this.lastOrderKind = order.kind;
     sim.setOrder(this.state, order);
+  }
+
+  /** Void the BRAIN "then" chain — death, floor change, restart, ceremony, ending. */
+  private clearThenChain(): void {
+    this.pendingThen = null;
+    this.lastOrderKind = null;
   }
 
   // ---------------------------------------------------------------- ceremonies
@@ -616,6 +658,7 @@ class Director {
   private startCeremony(floor: number): void {
     const options = TRIADS[floor];
     if (!options) return;
+    this.clearThenChain();
     this.ceremony = { options: [...options], floor };
     this.ceremonyNudged = false;
     sim.setOrder(this.state, null); // parked — frozen halts enemies, not orders
@@ -663,6 +706,7 @@ class Director {
   }
 
   private earsCeremony(): void {
+    this.clearThenChain();
     this.state.frozen = true;
     this.audio.playSfx('powerup');
     this.state.robot.tier = 1;
@@ -673,6 +717,20 @@ class Director {
       this.state.frozen = false;
     }, 2500);
     logEvent('ears_tier1');
+  }
+
+  private brainCeremony(): void {
+    this.clearThenChain();
+    this.state.frozen = true;
+    sim.applyBrain(this.state);
+    this.audio.playSfx('powerup');
+    this.speech.sayBank('new_brain', 'beat', 500);
+    this.speech.sayBank('brain_hint', 'beat');
+    sim.openCrate(this.state, 'crate_BRAIN');
+    setTimeout(() => {
+      this.state.frozen = false;
+    }, 2500);
+    logEvent('brain_installed');
   }
 
   // ---------------------------------------------------------------- sim events
@@ -731,6 +789,7 @@ class Director {
         case 'crate_reached': {
           const floor = this.state.floorIndex + 1;
           if (ev.id === 'crate_EARS') this.earsCeremony();
+          else if (ev.id === 'crate_BRAIN') this.brainCeremony();
           else if (ev.id === 'crate_triad' && TRIADS[floor] && !this.ceremony) {
             this.startCeremony(floor);
           }
@@ -764,7 +823,19 @@ class Director {
         case 'chip_flee':
           this.speech.sayBank('flee', 'bark');
           break;
-        case 'order_done':
+        case 'order_done': {
+          // Sim nulls robot.order before emitting — the director's own record
+          // is the only witness to WHAT finished.
+          const wasHide = this.lastOrderKind === 'hide';
+          this.lastOrderKind = null;
+          if (wasHide) this.speech.sayBank('hide_done', 'bark');
+          if (this.pendingThen) {
+            const next = this.pendingThen;
+            this.pendingThen = null;
+            this.apply(next);
+          }
+          break;
+        }
         case 'chip_detour':
           break;
       }
@@ -786,7 +857,8 @@ class Director {
       this.cliffhanger();
       return;
     }
-    // A ceremony abandoned at the doors dies with its floor.
+    // A ceremony abandoned at the doors dies with its floor. So does a chain.
+    this.clearThenChain();
     this.ceremony = null;
     this.ui.ceremonyOptions = null;
     this.state.frozen = false;
@@ -811,6 +883,7 @@ class Director {
 
   private onDeath(cause: string): void {
     this.runEpoch++;
+    this.clearThenChain();
     this.speech.clear();
     this.audio.playSfx('powerdown');
     this.render.fx.glitchFrame();
@@ -841,6 +914,7 @@ class Director {
   private restart(): void {
     if (this.ui.phase === 'boot') return;
     this.runEpoch++;
+    this.clearThenChain();
     this.speech.clear();
     this.render.fx.deadCam(false);
     this.state = sim.initialState((Date.now() % 2147483647) | 0);
@@ -868,6 +942,7 @@ class Director {
     if (this.ended) return;
     this.ended = true;
     this.runEpoch++;
+    this.clearThenChain();
     this.speech.clear();
     this.ui.phase = 'cliffhanger';
     this.ui.osd = 'CAM 06 · FLOOR 06 · NO SIGNAL';
@@ -945,7 +1020,12 @@ class Director {
           const threshold = this.awaitingFirstOrder ? 25000 : 40000;
           if (silence > threshold) {
             this.lastIdleAt = now;
-            const line = pick(LINE_GROUPS.idle);
+            // BRAIN widens the idle pool with suggestion barks (merge here —
+            // LINE_GROUPS is shared and stays untouched).
+            const pool: readonly string[] = this.state.robot.brain
+              ? [...LINE_GROUPS.idle, 'idle_ideas', 'idle_tactics']
+              : LINE_GROUPS.idle;
+            const line = pick(pool);
             if (line === 'idle_spin') this.audio.playSfx('spin');
             this.speech.sayBank(line, 'idle');
           }

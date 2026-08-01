@@ -53,6 +53,42 @@ export function solidAtPx(solid: boolean[][], x: number, y: number): boolean {
   return isSolidTile(solid, Math.floor(x / TILE), Math.floor(y / TILE));
 }
 
+/**
+ * Grid raycast (Amanatides–Woo DDA over TILE px tiles): true when a solid tile
+ * lies on the segment a→b (line of sight blocked). Endpoint tiles count too —
+ * callers only pass walkable endpoints.
+ */
+export function losBlocked(solid: boolean[][], a: Vec, b: Vec): boolean {
+  let tx = Math.floor(a.x / TILE);
+  let ty = Math.floor(a.y / TILE);
+  const txEnd = Math.floor(b.x / TILE);
+  const tyEnd = Math.floor(b.y / TILE);
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const stepX = dx > 0 ? 1 : -1;
+  const stepY = dy > 0 ? 1 : -1;
+  const tDeltaX = dx !== 0 ? Math.abs(TILE / dx) : Infinity;
+  const tDeltaY = dy !== 0 ? Math.abs(TILE / dy) : Infinity;
+  // Param t in [0,1] along a→b at which the ray crosses the next tile border.
+  let tMaxX =
+    dx !== 0 ? (dx > 0 ? (tx + 1) * TILE - a.x : a.x - tx * TILE) / Math.abs(dx) : Infinity;
+  let tMaxY =
+    dy !== 0 ? (dy > 0 ? (ty + 1) * TILE - a.y : a.y - ty * TILE) / Math.abs(dy) : Infinity;
+  // Visits at most |Δtx|+|Δty|+1 tiles; the guard only backstops float edge cases.
+  for (let guard = 0; guard <= TILES_X + TILES_Y + 2; guard++) {
+    if (isSolidTile(solid, tx, ty)) return true;
+    if (tx === txEnd && ty === tyEnd) return false;
+    if (tMaxX < tMaxY) {
+      tx += stepX;
+      tMaxX += tDeltaX;
+    } else {
+      ty += stepY;
+      tMaxY += tDeltaY;
+    }
+  }
+  return false;
+}
+
 function circleRectOverlap(
   cx: number,
   cy: number,

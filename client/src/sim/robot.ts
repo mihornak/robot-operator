@@ -4,17 +4,26 @@
  * Straight-line seeking with wall slide is deliberate — dumb pathing is the joke.
  */
 import type { Entity, Order, RobotState, SimState, Vec } from '../../../shared/types';
+import { TILE, TILES_X, TILES_Y } from '../../../shared/types';
 import { BASE } from '../../../shared/content';
 import {
   ARRIVE_RADIUS,
   ATTACK_RANGE,
+  AVOID_REPULSE_RADIUS,
   BOLT_SPEED,
   CABLE_STUN_TICKS,
+  CAREFUL_REPULSE_RADIUS,
+  CAREFUL_SPEED,
   CRATE_NOTICE,
   ELEV_REACH,
+  HIDE_ARRIVE,
+  HIDE_SEARCH_RADIUS,
   IFRAME_TICKS,
   MAGNET_RADIUS,
   PICKUP_RADIUS,
+  REPULSE_CLEAR,
+  REPULSE_SWIRL,
+  REPULSE_WEIGHT,
   ROBOT_R,
   SHOOT_CONE_COS,
   SHOOT_RANGE,
@@ -28,7 +37,7 @@ import {
   nearestHostile,
 } from './internal';
 import type { RobotScratch } from './internal';
-import { DT, angleLerp, dirToVec, dist, moveCircle, norm } from './physics';
+import { DT, angleLerp, dirToVec, dist, isSolidTile, losBlocked, moveCircle, norm } from './physics';
 
 function easeHead(r: RobotState): void {
   r.headFacing = angleLerp(r.headFacing, r.facing, 0.15);
@@ -44,10 +53,10 @@ function shootCdMax(r: RobotState): number {
 }
 
 /** Set velocity toward dirUnit, update facing, move with wall slide. Returns px moved. */
-function moveAndFace(state: SimState, dirUnit: Vec): number {
+function moveAndFace(state: SimState, dirUnit: Vec, speedScale = 1): number {
   const r = state.robot;
-  r.vel.x = dirUnit.x * r.speed;
-  r.vel.y = dirUnit.y * r.speed;
+  r.vel.x = dirUnit.x * r.speed * speedScale;
+  r.vel.y = dirUnit.y * r.speed * speedScale;
   if (Math.abs(r.vel.x) > 0.01 || Math.abs(r.vel.y) > 0.01) r.facing = Math.atan2(r.vel.y, r.vel.x);
   return moveCircle(state.solid, r.pos, r.vel.x * DT, r.vel.y * DT, ROBOT_R);
 }
@@ -55,6 +64,48 @@ function moveAndFace(state: SimState, dirUnit: Vec): number {
 function seekPoint(state: SimState, target: Vec): number {
   const r = state.robot;
   return moveAndFace(state, norm({ x: target.x - r.pos.x, y: target.y - r.pos.y }));
+}
+
+/** Add linear-falloff repulsion away from e into acc. Full REPULSE_WEIGHT at
+ *  the danger edge (REPULSE_CLEAR from center), 0 at clear+radius: peak > 1
+ *  beats the unit seek, so careful can never push through the zone head-on.
+ *  A tangential swirl component (side picked deterministically toward where
+ *  `desired` already leans) makes dead-ahead hazards get orbited — a pure
+ *  radial field just oscillates on the approach axis forever. */
+function addRepulse(r: RobotState, e: Entity, radius: number, desired: Vec, acc: Vec): void {
+  const dEff = Math.max(0, dist(r.pos, e.pos) - REPULSE_CLEAR);
+  if (dEff >= radius) return;
+  const w = REPULSE_WEIGHT * (1 - dEff / radius);
+  const away = norm({ x: r.pos.x - e.pos.x, y: r.pos.y - e.pos.y });
+  const side = away.x * desired.y - away.y * desired.x >= 0 ? 1 : -1;
+  acc.x += away.x * w - away.y * side * w * REPULSE_SWIRL;
+  acc.y += away.y * w + away.x * side * w * REPULSE_SWIRL;
+}
+
+/**
+ * BRAIN steering: blend a desired unit direction with repulsion from standing
+ * avoidIds (always) and, when careful, live hostiles + cables. Normalized —
+ * full speed along the blend; a dead-cancel (cornered) yields {0,0} and the
+ * bumpCheck give-up handles it like a wall.
+ */
+function steer(state: SimState, desired: Vec, careful: boolean): Vec {
+  const r = state.robot;
+  if (!careful && r.avoidIds.length === 0) return desired;
+  const acc = { x: desired.x, y: desired.y };
+  for (const e of state.entities) {
+    if (e.dead) continue;
+    if (r.avoidIds.includes(e.id)) addRepulse(r, e, AVOID_REPULSE_RADIUS, desired, acc);
+    else if (careful && (e.kind === 'fusedPrinter' || e.kind === 'cable'))
+      addRepulse(r, e, CAREFUL_REPULSE_RADIUS, desired, acc);
+  }
+  return norm(acc);
+}
+
+/** Order-execution seek (goto/pickup/enter/hide): steered + careful-scaled. */
+function steerSeek(state: SimState, target: Vec, careful: boolean): number {
+  const r = state.robot;
+  const desired = norm({ x: target.x - r.pos.x, y: target.y - r.pos.y });
+  return moveAndFace(state, steer(state, desired, careful), careful ? CAREFUL_SPEED : 1);
 }
 
 /** Bump-bump-bump for ~4s (long enough for the scripted gag), then give up. */
@@ -112,6 +163,73 @@ function coneTarget(state: SimState): Vec | null {
   return best;
 }
 
+/** Cover must hold across the whole HIDE_ARRIVE landing slop, not just at the
+ *  exact center — a ray that merely grazes a wall corner is not hiding. */
+function coverBlocked(solid: boolean[][], c: Vec, hostile: Vec): boolean {
+  return (
+    losBlocked(solid, c, hostile) &&
+    losBlocked(solid, { x: c.x - HIDE_ARRIVE, y: c.y }, hostile) &&
+    losBlocked(solid, { x: c.x + HIDE_ARRIVE, y: c.y }, hostile) &&
+    losBlocked(solid, { x: c.x, y: c.y - HIDE_ARRIVE }, hostile) &&
+    losBlocked(solid, { x: c.x, y: c.y + HIDE_ARRIVE }, hostile)
+  );
+}
+
+/**
+ * BRAIN hide: pick a cover point. Candidates are walkable tile centers within
+ * HIDE_SEARCH_RADIUS (tile non-solid ⇒ r=7 circle fits: 7 < TILE/2). With a
+ * live hostile: nearest candidate whose LOS to it is wall-blocked; if none
+ * breaks LOS, the candidate farthest from the hostile — the robot BELIEVES it
+ * is hidden. No hostile: nearest candidate hugging a wall (a nook).
+ * Fixed y→x scan order + strict comparisons keep the pick deterministic.
+ */
+function findCover(state: SimState): Vec {
+  const r = state.robot;
+  const hostile = nearestHostile(state);
+  const minTx = Math.max(0, Math.floor((r.pos.x - HIDE_SEARCH_RADIUS) / TILE));
+  const maxTx = Math.min(TILES_X - 1, Math.floor((r.pos.x + HIDE_SEARCH_RADIUS) / TILE));
+  const minTy = Math.max(0, Math.floor((r.pos.y - HIDE_SEARCH_RADIUS) / TILE));
+  const maxTy = Math.min(TILES_Y - 1, Math.floor((r.pos.y + HIDE_SEARCH_RADIUS) / TILE));
+
+  let best: Vec | null = null; // hostile: nearest LOS-breaker | none: nearest nook
+  let bestD = Infinity;
+  let far: Vec | null = null; // hostile fallback: farthest from it
+  let farD = -1;
+  for (let ty = minTy; ty <= maxTy; ty++) {
+    for (let tx = minTx; tx <= maxTx; tx++) {
+      if (isSolidTile(state.solid, tx, ty)) continue;
+      const c: Vec = { x: tx * TILE + TILE / 2, y: ty * TILE + TILE / 2 };
+      const dRobot = dist(r.pos, c);
+      if (dRobot > HIDE_SEARCH_RADIUS) continue;
+      if (hostile) {
+        if (coverBlocked(state.solid, c, hostile.pos)) {
+          if (dRobot < bestD) {
+            bestD = dRobot;
+            best = c;
+          }
+        } else {
+          const dHostile = dist(c, hostile.pos);
+          if (dHostile > farD) {
+            farD = dHostile;
+            far = c;
+          }
+        }
+      } else {
+        const nook =
+          isSolidTile(state.solid, tx - 1, ty) ||
+          isSolidTile(state.solid, tx + 1, ty) ||
+          isSolidTile(state.solid, tx, ty - 1) ||
+          isSolidTile(state.solid, tx, ty + 1);
+        if (nook && dRobot < bestD) {
+          bestD = dRobot;
+          best = c;
+        }
+      }
+    }
+  }
+  return best ?? far ?? { x: r.pos.x, y: r.pos.y };
+}
+
 /** Would executing this order move the robot away from the hostile? (RAGE check) */
 function movesAway(state: SimState, order: Order, hostile: Entity): boolean {
   const r = state.robot;
@@ -157,7 +275,7 @@ function executeOrder(state: SimState, order: Order | null, scratch: RobotScratc
   }
   switch (order.kind) {
     case 'move': {
-      const moved = moveAndFace(state, dirToVec(order.dir));
+      const moved = moveAndFace(state, steer(state, dirToVec(order.dir), false));
       bumpCheck(state, moved, r.speed * DT);
       // Nudge ("a bit" / "one step"): stop after distancePx of ACTUAL travel.
       // Wall bumps still interrupt via bumpCheck above (order may be cleared).
@@ -204,8 +322,9 @@ function executeOrder(state: SimState, order: Order | null, scratch: RobotScratc
         halt(r);
         return;
       }
-      const moved = seekPoint(state, t.pos);
-      bumpCheck(state, moved, Math.min(r.speed * DT, d));
+      const careful = order.careful === true;
+      const moved = steerSeek(state, t.pos, careful);
+      bumpCheck(state, moved, Math.min(r.speed * (careful ? CAREFUL_SPEED : 1) * DT, d));
       return;
     }
     case 'attack': {
@@ -278,8 +397,9 @@ function executeOrder(state: SimState, order: Order | null, scratch: RobotScratc
         }
         return;
       }
-      const moved = seekPoint(state, t.pos);
-      bumpCheck(state, moved, r.speed * DT);
+      const careful = order.careful === true;
+      const moved = steerSeek(state, t.pos, careful);
+      bumpCheck(state, moved, r.speed * (careful ? CAREFUL_SPEED : 1) * DT);
       return;
     }
     case 'enter': {
@@ -301,8 +421,23 @@ function executeOrder(state: SimState, order: Order | null, scratch: RobotScratc
         // powered elevB: the proximity pass emits elevator_entered
         return;
       }
-      const moved = seekPoint(state, t.pos);
+      const moved = steerSeek(state, t.pos, false);
       bumpCheck(state, moved, r.speed * DT);
+      return;
+    }
+    case 'hide': {
+      // BRAIN: cover point computed once per order (setOrder clears it).
+      scratch.hideTarget ??= findCover(state);
+      const t = scratch.hideTarget;
+      const d = dist(r.pos, t);
+      if (d <= HIDE_ARRIVE) {
+        halt(r);
+        r.order = null;
+        emit(state, 'order_done'); // no id — cover is a point, not an entity
+        return;
+      }
+      const moved = steerSeek(state, t, false);
+      bumpCheck(state, moved, Math.min(r.speed * DT, d));
       return;
     }
   }
@@ -312,6 +447,12 @@ export function stepRobot(state: SimState, scratch: RobotScratch): void {
   const r = state.robot;
   if (scratch.iframes > 0) scratch.iframes--;
   if (r.shootCd > 0) r.shootCd--;
+  // Quiet posture: refreshed while a careful order runs, lingers ~6s after it
+  // completes so arriving somewhere sneakily doesn't instantly blow cover.
+  const carefulNow =
+    r.order !== null && (r.order.kind === 'goto' || r.order.kind === 'pickup') && r.order.careful === true;
+  if (carefulNow) scratch.sneakLingerTicks = 360;
+  else if (scratch.sneakLingerTicks > 0) scratch.sneakLingerTicks--;
 
   if (r.sulkTicks > 0) {
     r.sulkTicks--;

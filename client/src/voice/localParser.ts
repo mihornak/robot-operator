@@ -5,7 +5,15 @@
  * ≤7 words per sentence, uppercase, overconfident.
  */
 
-import type { ChipId, Dir, EarsTier, ParseEntity, ParsedCommand, Utterance } from '@shared/types';
+import type {
+  ChipId,
+  Dir,
+  EarsTier,
+  IntentType,
+  ParseEntity,
+  ParsedCommand,
+  Utterance,
+} from '@shared/types';
 import { CHIPS } from '@shared/content';
 
 export interface LocalParseCtx {
@@ -13,6 +21,8 @@ export interface LocalParseCtx {
   options: ChipId[] | null;
   awaitingName: boolean;
   entities: ParseEntity[];
+  /** BRAIN installed — hide/avoid/careful/then vocabulary live. Defaults false. */
+  brain?: boolean;
 }
 
 // ---------------------------------------------------------------- wordlists
@@ -123,6 +133,21 @@ const HELP_PHRASES = [
 /** norm() strips apostrophes, so "don't" arrives as "dont". */
 const NEGATIONS = new Set(['dont', 'not', 'never', 'no']);
 
+// --- BRAIN vocabulary (norm() strips apostrophes: "don't touch" → "dont touch") ---
+const HIDE_WORDS = new Set(['hide', 'hides', 'hiding', 'cover', 'vanish']);
+const HIDE_PHRASES = ['take cover', 'get behind', 'go behind'];
+const AVOID_WORDS = new Set(['avoid', 'avoids']);
+const AVOID_PHRASES = ['stay away', 'keep away', 'dont touch', 'dont go near', 'stay clear', 'steer clear'];
+const CAREFUL_WORDS = new Set([
+  'sneak', 'sneaks', 'sneaky', 'careful', 'carefully', 'quiet', 'quietly', 'slowly', 'gently', 'cautious',
+]);
+/** "X then Y" / "X and then Y" splitter (text is norm()'d — no punctuation). */
+const THEN_SPLIT = /\s(?:and\s+)?then\s/;
+/** Intents a BRAIN chain may hold (commands only, no meta). */
+const CHAINABLE = new Set<IntentType>([
+  'move', 'stop', 'shoot', 'goto', 'attack', 'pickup', 'enter_elevator', 'hide', 'avoid',
+]);
+
 // ---------------------------------------------------------------- helpers
 
 function norm(s: string): string {
@@ -188,7 +213,7 @@ export function parseLocal(utterance: Utterance | string, ctx: LocalParseCtx): P
   const text = norm(typeof utterance === 'string' ? utterance : utterance.text);
   const tokens = text.length > 0 ? text.split(' ') : [];
   const insult = tokens.some((t) => INSULTS.has(t));
-  const base = interpret(text, tokens, ctx, insult);
+  const base = interpret(text, tokens, ctx, insult, 0);
   return { ...base, ...(insult ? { insult: true } : {}), source: 'local' };
 }
 
@@ -197,6 +222,7 @@ function interpret(
   tokens: string[],
   ctx: LocalParseCtx,
   insult: boolean,
+  depth: number,
 ): ParsedCommand {
   // naming beat — refusal/indifference means the robot names itself
   if (ctx.awaitingName) {
@@ -238,6 +264,64 @@ function interpret(
     return { intent: 'clarify', ack_line: 'ROBOT READS AGAIN. LISTEN BETTER.' };
   }
 
+  // BRAIN chains: "X then Y" → primary + then via ONE recursive call (depth 1).
+  // A third step is dropped, and the ack admits it.
+  if (depth === 0) {
+    const parts = text.split(THEN_SPLIT).map((p) => p.trim()).filter(Boolean);
+    if (parts.length > 1) {
+      if (!ctx.brain) return { intent: 'clarify', ack_line: 'PLANS NEED BIGGER BRAIN.' };
+      const primary = interpret(parts[0], parts[0].split(' '), ctx, insult, 1);
+      if (!CHAINABLE.has(primary.intent)) return primary;
+      const second = interpret(parts[1], parts[1].split(' '), ctx, insult, 1);
+      if (!CHAINABLE.has(second.intent)) return primary;
+      primary.then = second;
+      primary.ack_line =
+        parts.length > 2 ? 'ROBOT HOLDS TWO IDEAS ONLY.' : 'ROBOT HAS PLAN. TWO STEPS.';
+      return primary;
+    }
+  }
+
+  const hideAsk = tokens.some((t) => HIDE_WORDS.has(t)) || HIDE_PHRASES.some((p) => text.includes(p));
+  const avoidAsk = tokens.some((t) => AVOID_WORDS.has(t)) || AVOID_PHRASES.some((p) => text.includes(p));
+  const carefulAsk = tokens.some((t) => CAREFUL_WORDS.has(t));
+
+  // No BRAIN yet: name the limitation, crystal clear.
+  if (!ctx.brain && (hideAsk || avoidAsk || carefulAsk)) {
+    const word = hideAsk ? 'HIDE' : avoidAsk ? 'AVOID' : 'SNEAK';
+    return { intent: 'clarify', ack_line: `${word}? ROBOT BRAIN TOO SMALL.` };
+  }
+
+  if (ctx.brain && avoidAsk) {
+    const ent = matchEntity(tokens, ctx.entities);
+    if (ent) {
+      return { intent: 'avoid', target: ent.id, ack_line: `ROBOT AVOIDS ${entLabel(ent)}. FOREVER.` };
+    }
+    return { intent: 'clarify', ack_line: 'ROBOT AVOIDS WHAT? SAY THING.' };
+  }
+  if (ctx.brain && hideAsk) {
+    return { intent: 'hide', ack_line: 'ROBOT HIDES NOW. NOBODY SEES ROBOT.' };
+  }
+
+  const cmd = command(text, tokens, ctx, insult);
+  // careful (BRAIN) rides on movement-ish commands only.
+  if (
+    ctx.brain &&
+    carefulAsk &&
+    (cmd.intent === 'move' || cmd.intent === 'goto' || cmd.intent === 'pickup')
+  ) {
+    cmd.careful = true;
+    cmd.ack_line = 'ROBOT SNEAKS. VERY QUIET.';
+  }
+  return cmd;
+}
+
+/** Pre-BRAIN heuristics (negation/dir/stop/help/targets/shoot/chatter), unchanged family. */
+function command(
+  text: string,
+  tokens: string[],
+  ctx: LocalParseCtx,
+  insult: boolean,
+): ParsedCommand {
   // negated verb/dir ("dont go left") must not execute as the command itself.
   // STOPS deliberately excluded: "no no stop" must still stop.
   const negIdx = tokens.findIndex((t) => NEGATIONS.has(t));
@@ -266,7 +350,7 @@ function interpret(
 
   if (dir) return { intent: 'move', dir, ack_line: `ROBOT GOES ${dir.toUpperCase()}.` };
 
-  // help: proud capability listing, tier-appropriate
+  // help: proud capability listing, tier- and brain-appropriate
   if (
     HELP_PHRASES.some((p) => text.includes(p)) ||
     (tokens.includes('help') &&
@@ -274,7 +358,11 @@ function interpret(
   ) {
     return {
       intent: 'chatter',
-      ack_line: ctx.tier >= 1 ? 'ROBOT GOES TO THINGS. SAY THING.' : 'ROBOT KNOWS GO, STOP, SHOOT.',
+      ack_line: ctx.brain
+        ? 'ROBOT HIDES. AVOIDS. SNEAKS. MAKES PLANS.'
+        : ctx.tier >= 1
+          ? 'ROBOT GOES TO THINGS. SAY THING.'
+          : 'ROBOT KNOWS GO, STOP, SHOOT.',
     };
   }
 

@@ -6,7 +6,7 @@
 
 import type { ParsedCommand, ParseRequest } from '../../shared/types';
 import { serverLocalParse } from './localParse';
-import { AMOUNTS, CHIP_IDS, DIRS, INTENTS, toParsedCommand } from './schema';
+import { AMOUNTS, CHAIN_INTENTS, CHIP_IDS, DIRS, INTENTS, toParsedCommand } from './schema';
 
 /** Whole-request deadline (both attempts) — the client ack contract is ≤1.5s. */
 export const PARSE_TIMEOUT_MS = 1400;
@@ -27,14 +27,32 @@ const RESPONSE_FORMAT = {
     schema: {
       type: 'object',
       additionalProperties: false,
-      required: ['intent', 'dir', 'amount', 'target', 'choice', 'name', 'ack_line', 'insult'],
+      required: [
+        'intent', 'dir', 'amount', 'careful', 'target', 'choice', 'name', 'then', 'ack_line', 'insult',
+      ],
       properties: {
         intent: { type: 'string', enum: [...INTENTS] },
         dir: { type: ['string', 'null'], enum: [...DIRS, null] },
         amount: { type: ['string', 'null'], enum: [...AMOUNTS, null] },
+        careful: { type: ['boolean', 'null'] },
         target: { type: ['string', 'null'] },
         choice: { type: ['string', 'null'], enum: [...CHIP_IDS, null] },
         name: { type: ['string', 'null'] },
+        // ONE-level chain (BRAIN "X then Y"). Explicitly non-recursive: the
+        // nested command has no `then` of its own and no meta fields.
+        then: {
+          type: ['object', 'null'],
+          additionalProperties: false,
+          required: ['intent', 'dir', 'amount', 'careful', 'target', 'ack_line'],
+          properties: {
+            intent: { type: 'string', enum: [...CHAIN_INTENTS] },
+            dir: { type: ['string', 'null'], enum: [...DIRS, null] },
+            amount: { type: ['string', 'null'], enum: [...AMOUNTS, null] },
+            careful: { type: ['boolean', 'null'] },
+            target: { type: ['string', 'null'] },
+            ack_line: { type: ['string', 'null'] },
+          },
+        },
         ack_line: { type: 'string' },
         insult: { type: ['boolean', 'null'] },
       },
@@ -44,13 +62,22 @@ const RESPONSE_FORMAT = {
 
 const SYSTEM_PROMPT = `You are the language center of ROBOT: a small, extremely confident, toddler-minded service robot in a dark broken facility. A human operator speaks to it over a crackly radio. Turn ONE utterance into ONE JSON command. You interpret INPUT only — you never decide outcomes, stats, or combat.
 
-CONTEXT FIELDS (user message JSON): utterance, shouted, tier, floor, robotName, personalityChips, options, awaitingName, entities (visible things: id/kind/label/dir/dist), recentRobotLines.
+CONTEXT FIELDS (user message JSON): utterance, shouted, tier, floor, robotName, personalityChips, options, awaitingName, brain, entities (visible things: id/kind/label/dir/dist), recentRobotLines.
 
 TIER (obey ruthlessly):
 - tier 0: ROBOT understands ONLY "move" (dir required), "stop", "shoot". It has NO concept of named things. When the player names a THING at tier 0 ("go to the elevator", "grab the crate") -> "clarify", and the ack MUST name the unknown word so the limitation is crystal clear: "ROBOT NOT KNOW ELEVATOR." / "CRATE NOT A ROBOT WORD." If a direction is half-implied with no named thing, a best-effort "move" with an ack that admits the guess ("ROBOT HEARD MAYBE-LEFT.") is fine.
 - tier 1: adds "goto", "attack", "pickup", "enter_elevator". "target" MUST be an id copied EXACTLY from entities. Never invent ids. Vague player -> confidently pick a plausible entity; wrong-but-plausible is good comedy.
 
 AMOUNT (on "move" only): "a bit" / "a little" / "slightly" / "a touch" -> amount "bit"; "one step" / "a step" / "two steps" (still one nudge) -> amount "step"; plain directions unchanged (amount null). "go left a bit and stop" is ONE move with amount "bit".
+
+BRAIN (context field brain — execution smarts, independent of tier):
+- brain false: ROBOT cannot hide, avoid, sneak, or plan. Hide/avoid/sneak/then-language -> "clarify", and the ack MUST name the limitation: "HIDE? ROBOT BRAIN TOO SMALL." / "SNEAK? ROBOT BRAIN TOO SMALL." / "PLANS NEED BIGGER BRAIN." NEVER output hide, avoid, careful, or then when brain is false.
+- brain true:
+  - "hide" / "take cover" / "get behind something" -> intent "hide" (no target): {"intent":"hide","ack_line":"ROBOT VANISHES. WATCH THIS."}
+  - "avoid the X" / "stay away from X" / "don't touch X" -> intent "avoid" + target (entity id, standing order): "avoid the printer" -> {"intent":"avoid","target":"<printer id from entities>","ack_line":"ROBOT AVOIDS PRINTER. FOREVER."}
+  - "sneak to X" / "carefully" / "quietly" -> the move/goto/pickup gets careful true: "sneak to the fuse" -> {"intent":"goto","target":"<fuse id>","careful":true,"ack_line":"ROBOT SNEAKS. VERY QUIET."}
+  - "X then Y" / "X and then Y" / "after that" -> the FIRST command, with "then" holding the SECOND (ONE level only; "then" never nests another "then"): "grab the fuse then hide" -> {"intent":"pickup","target":"<fuse id>","then":{"intent":"hide","ack_line":"THEN ROBOT HIDES."},"ack_line":"FUSE FIRST. THEN HIDING."} ; "go to the socket then get in the elevator" -> {"intent":"goto","target":"<socket id>","then":{"intent":"enter_elevator","target":"<elevator id>","ack_line":"THEN ELEVATOR."},"ack_line":"SOCKET FIRST. THEN ELEVATOR."}
+  - THREE or more steps: keep the first two, DROP the rest, and the ack admits it: "ROBOT HOLDS TWO IDEAS ONLY."
 
 SPECIAL MODES (they override the tier):
 - options is non-null (three crates were read aloud): map ANY selection language to "choose" + "choice" — the word itself, "the first one", "the angry one" (RAGE), "the shiny one" (MAGNET), "the red one", "yolo". Stated indifference ("whatever", "you pick", "don't care", "surprise me") -> "robot_choice".
@@ -72,7 +99,7 @@ ack_line — ALWAYS REQUIRED. ROBOT's repeat-back of what it understood, in ITS 
 ANCHORS (follow exactly):
 - NEVER answer real words with "VOICE IS MUMBLY" — that phrase means the audio was garbled and it reads as broken. When you understood the WORDS but not the request, NAME what you can't do: "ROBOT NOT KNOW ELEVATOR." / "BIG WORDS. ROBOT IS SMALL."
 - "stop" / "halt" / "wait" / "stay" -> intent "stop" (NEVER clarify): {"intent":"stop","ack_line":"ROBOT STOPS. STOPPING IS EASY."}
-- "help" / "what can you do" / "what do you know" / "how does this work" -> intent "chatter"; ack_line lists ITS OWN abilities by tier, proud: tier 0 "ROBOT KNOWS GO, STOP, SHOOT." tier 1 "ROBOT GOES TO THINGS. SAY THING." When a ceremony is active (options non-null) mention choosing instead.
+- "help" / "what can you do" / "what do you know" / "how does this work" -> intent "chatter"; ack_line lists ITS OWN abilities by tier, proud: tier 0 "ROBOT KNOWS GO, STOP, SHOOT." tier 1 "ROBOT GOES TO THINGS. SAY THING." brain true "ROBOT HIDES. AVOIDS. SNEAKS. MAKES PLANS." When a ceremony is active (options non-null) mention choosing instead.
 - "the elevator" with both a dead elevator and a working one visible -> target the WORKING one; only target the dead one if the player names it.
 - "the fuse" with both a fuse and a power socket visible -> target the fuse (kind "fuse"), never the socket.
 
@@ -90,6 +117,7 @@ function contextPayload(req: ParseRequest): Record<string, unknown> {
     personalityChips: req.personality,
     options: req.options,
     awaitingName: req.awaitingName,
+    brain: req.brain,
     entities: req.entities,
     recentRobotLines: req.recent,
   };

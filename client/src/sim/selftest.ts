@@ -5,7 +5,7 @@
  */
 import type { SimState } from '../../../shared/types';
 import { FLOORS, buildSolid } from './floors';
-import { applyChip, initialState, loadFloor, setOrder, step } from './index';
+import { addAvoid, applyBrain, applyChip, initialState, loadFloor, setOrder, step } from './index';
 import { solidAtPx } from './physics';
 
 const TICKS = 600;
@@ -14,7 +14,7 @@ const PINNED_IDS: string[][] = [
   ['elevA', 'elevB', 'scrap1'],
   ['elevA', 'elevB', 'crate_triad', 'cable1', 'scrap1'],
   ['elevA', 'elevB', 'crate_EARS', 'printer1', 'printer_nice', 'cable1', 'scrap1', 'scrap2'],
-  ['elevA', 'elevB', 'printer1', 'cable1', 'fuse1', 'socket1', 'mop1', 'scrap1'],
+  ['elevA', 'elevB', 'crate_BRAIN', 'printer1', 'cable1', 'fuse1', 'socket1', 'mop1', 'scrap1'],
   ['elevA', 'elevB', 'crate_triad', 'scrap1', 'scrap2'],
 ];
 
@@ -51,6 +51,15 @@ function script(t: number, s: SimState): void {
       break;
     case 520:
       setOrder(s, { kind: 'goto', targetId: 'elevB' });
+      break;
+    case 540:
+      // BRAIN: hide picks cover (LOS raycast) and seeks it; avoid steers wide.
+      applyBrain(s);
+      addAvoid(s, 'cable1');
+      setOrder(s, { kind: 'hide' });
+      break;
+    case 570:
+      setOrder(s, { kind: 'goto', targetId: 'scrap2', careful: true });
       break;
   }
 }
