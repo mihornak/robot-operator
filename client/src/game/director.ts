@@ -70,6 +70,7 @@ class Director {
     stickyNote: true, // taped to the monitor before the monitor is even on
     talkHint: false,
     deathCard: null,
+    ceremonyOptions: null,
     headToCameraMs: 0,
     moodGlyph: '',
     danger: 0,

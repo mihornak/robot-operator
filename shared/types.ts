@@ -74,7 +74,7 @@ export interface Projectile {
 
 /** Standing order the behavior tree executes. Set by the director from parsed commands. */
 export type Order =
-  | { kind: 'move'; dir: Dir } // tier 0: keeps going until wall/stop
+  | { kind: 'move'; dir: Dir; distancePx?: number } // tier 0: until wall/stop; distancePx = nudge ("a bit", "one step") then order_done
   | { kind: 'stop' }
   | { kind: 'shoot' } // fire at nearest hostile in facing cone, else straight ahead
   | { kind: 'goto'; targetId: string } // tier 1: straight-line to entity (through hazards — that's the joke)
@@ -181,6 +181,8 @@ export type IntentType =
 export interface ParsedCommand {
   intent: IntentType;
   dir?: Dir;
+  /** Movement magnitude: 'bit' ≈ 20px, 'step' ≈ 16px, omitted = until wall/stop. */
+  amount?: 'bit' | 'step';
   /** Entity id from ParseRequest.entities. */
   target?: string;
   choice?: ChipId;
@@ -294,6 +296,9 @@ export interface UiState {
   /** "HOLD [SPACE] TO TALK" onboarding hint — director sets ~3s after boot until first PTT. */
   talkHint: boolean;
   deathCard: DeathCard | null;
+  /** Triad options panel (single shiny crate opened): render as an on-feed CRT
+   *  card — glyph, spoken name, one-line blurb each. Voice-only selection. */
+  ceremonyOptions: Array<{ id: ChipId; name: string; blurb: string }> | null;
   /** Robot head should aim at camera (ack tell), decays in render. */
   headToCameraMs: number;
   /** Mood glyph on OSD: '' | 'SULK' | 'FLEE'. */
