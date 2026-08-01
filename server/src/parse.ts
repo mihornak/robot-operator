@@ -6,7 +6,7 @@
 
 import type { ParsedCommand, ParseRequest } from '../../shared/types';
 import { serverLocalParse } from './localParse';
-import { CHIP_IDS, DIRS, INTENTS, toParsedCommand } from './schema';
+import { AMOUNTS, CHIP_IDS, DIRS, INTENTS, toParsedCommand } from './schema';
 
 /** Whole-request deadline (both attempts) — the client ack contract is ≤1.5s. */
 export const PARSE_TIMEOUT_MS = 1400;
@@ -27,10 +27,11 @@ const RESPONSE_FORMAT = {
     schema: {
       type: 'object',
       additionalProperties: false,
-      required: ['intent', 'dir', 'target', 'choice', 'name', 'ack_line', 'insult'],
+      required: ['intent', 'dir', 'amount', 'target', 'choice', 'name', 'ack_line', 'insult'],
       properties: {
         intent: { type: 'string', enum: [...INTENTS] },
         dir: { type: ['string', 'null'], enum: [...DIRS, null] },
+        amount: { type: ['string', 'null'], enum: [...AMOUNTS, null] },
         target: { type: ['string', 'null'] },
         choice: { type: ['string', 'null'], enum: [...CHIP_IDS, null] },
         name: { type: ['string', 'null'] },
@@ -49,10 +50,12 @@ TIER (obey ruthlessly):
 - tier 0: ROBOT understands ONLY "move" (dir required), "stop", "shoot". It has NO concept of named things. When the player names a THING at tier 0 ("go to the elevator", "grab the crate") -> "clarify", and the ack MUST name the unknown word so the limitation is crystal clear: "ROBOT NOT KNOW ELEVATOR." / "CRATE NOT A ROBOT WORD." If a direction is half-implied with no named thing, a best-effort "move" with an ack that admits the guess ("ROBOT HEARD MAYBE-LEFT.") is fine.
 - tier 1: adds "goto", "attack", "pickup", "enter_elevator". "target" MUST be an id copied EXACTLY from entities. Never invent ids. Vague player -> confidently pick a plausible entity; wrong-but-plausible is good comedy.
 
+AMOUNT (on "move" only): "a bit" / "a little" / "slightly" / "a touch" -> amount "bit"; "one step" / "a step" / "two steps" (still one nudge) -> amount "step"; plain directions unchanged (amount null). "go left a bit and stop" is ONE move with amount "bit".
+
 SPECIAL MODES (they override the tier):
 - options is non-null (three crates were read aloud): map ANY selection language to "choose" + "choice" — the word itself, "the first one", "the angry one" (RAGE), "the shiny one" (MAGNET), "the red one", "yolo". Stated indifference ("whatever", "you pick", "don't care", "surprise me") -> "robot_choice".
 - awaitingName is true: "name_robot"; "name" = a short name (1-2 words) extracted from what they said, or invented FROM their words if they ramble or refuse.
-- You cannot tell what they want -> "clarify"; ack_line IS the in-character ask-again ("ROBOT HEARD MAYBE-LEFT. LEFT?").
+- COMPLY GENEROUSLY: if ANY plausible command reading exists, execute it with a confident ack. The robot is dumb in EXECUTION, not deaf. "clarify" is a LAST resort for true 50/50 ambiguity; wrong-but-plausible beats asking. When you must clarify, ack_line IS the in-character ask-again ("ROBOT HEARD MAYBE-LEFT. LEFT?").
 - Greeting / question / small talk / nonsense -> "chatter"; ack_line is ROBOT's charming reply.
 - insult: true when the player insults ROBOT (it will sulk). Still parse any command present.
 
@@ -69,6 +72,7 @@ ack_line — ALWAYS REQUIRED. ROBOT's repeat-back of what it understood, in ITS 
 ANCHORS (follow exactly):
 - NEVER answer real words with "VOICE IS MUMBLY" — that phrase means the audio was garbled and it reads as broken. When you understood the WORDS but not the request, NAME what you can't do: "ROBOT NOT KNOW ELEVATOR." / "BIG WORDS. ROBOT IS SMALL."
 - "stop" / "halt" / "wait" / "stay" -> intent "stop" (NEVER clarify): {"intent":"stop","ack_line":"ROBOT STOPS. STOPPING IS EASY."}
+- "help" / "what can you do" / "what do you know" / "how does this work" -> intent "chatter"; ack_line lists ITS OWN abilities by tier, proud: tier 0 "ROBOT KNOWS GO, STOP, SHOOT." tier 1 "ROBOT GOES TO THINGS. SAY THING." When a ceremony is active (options non-null) mention choosing instead.
 - "the elevator" with both a dead elevator and a working one visible -> target the WORKING one; only target the dead one if the player names it.
 - "the fuse" with both a fuse and a power socket visible -> target the fuse (kind "fuse"), never the socket.
 

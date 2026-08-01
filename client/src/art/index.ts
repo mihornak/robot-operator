@@ -25,6 +25,7 @@ import {
 import {
   drawCable,
   drawCrate,
+  drawCrateTriad,
   drawElevator,
   drawFuse,
   drawFuseSocket,
@@ -55,6 +56,7 @@ const DRAWERS: Record<ArtName, Drawer> = {
   mop: drawMop,
   scrap: drawScrap,
   crate: drawCrate,
+  crate_triad: drawCrateTriad,
   pedestal: drawPedestal,
   fuse: drawFuse,
   fuse_socket: drawFuseSocket,

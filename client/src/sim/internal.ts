@@ -59,10 +59,19 @@ export interface RobotScratch {
   fleeEpisode: boolean;
   /** Scrap id MAGNET is detouring to; null when not detouring. */
   magnetTargetId: string | null;
+  /** Px actually traveled under the CURRENT move order (distancePx nudges). */
+  moveTraveledPx: number;
 }
 
 export function newScratch(): RobotScratch {
-  return { iframes: 0, stun: 0, rageNotified: false, fleeEpisode: false, magnetTargetId: null };
+  return {
+    iframes: 0,
+    stun: 0,
+    rageNotified: false,
+    fleeEpisode: false,
+    magnetTargetId: null,
+    moveTraveledPx: 0,
+  };
 }
 
 // ---------------------------------------------------------------- helpers

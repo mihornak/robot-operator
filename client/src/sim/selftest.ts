@@ -12,19 +12,23 @@ const TICKS = 600;
 
 const PINNED_IDS: string[][] = [
   ['elevA', 'elevB', 'scrap1'],
-  ['elevA', 'elevB', 'crate_MAGNET', 'crate_RAGE', 'crate_SCARED', 'cable1', 'scrap1'],
+  ['elevA', 'elevB', 'crate_triad', 'cable1', 'scrap1'],
   ['elevA', 'elevB', 'crate_EARS', 'printer1', 'printer_nice', 'cable1', 'scrap1', 'scrap2'],
   ['elevA', 'elevB', 'printer1', 'cable1', 'fuse1', 'socket1', 'mop1', 'scrap1'],
-  ['elevA', 'elevB', 'crate_MEMORY', 'crate_ZAP', 'crate_TOUGH', 'scrap1', 'scrap2'],
+  ['elevA', 'elevB', 'crate_triad', 'scrap1', 'scrap2'],
 ];
 
-/** Scripted order sequence — exercises movement, chips, combat, rng, floor load. */
+/** Scripted order sequence — exercises movement, nudges, chips, combat, rng, floor load. */
 function script(t: number, s: SimState): void {
   switch (t) {
     case 1:
       setOrder(s, { kind: 'move', dir: 'right' });
       break;
-    case 80:
+    case 60:
+      // nudge: must halt + emit order_done after ~20px, well before t=100
+      setOrder(s, { kind: 'move', dir: 'down', distancePx: 20 });
+      break;
+    case 100:
       setOrder(s, { kind: 'move', dir: 'up' });
       break;
     case 140:

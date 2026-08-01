@@ -499,6 +499,18 @@ class Director {
       return;
     }
 
+    // Safety net: "what can you do"-style chatter must never be dead air.
+    // If the parser (server or local) returned no reply, answer by tier.
+    if (cmd.intent === 'chatter' && !(cmd.ack_line ?? '').trim()) {
+      cmd = {
+        ...cmd,
+        ack_line:
+          this.state.robot.tier === 0
+            ? 'ROBOT KNOWS GO, STOP, SHOOT.'
+            : 'ROBOT GOES TO THINGS NOW. SAY THING.',
+      };
+    }
+
     this.lastHeard = cmd.ack_line.toUpperCase();
     if (cmd.insult) {
       sim.sulk(this.state, 180);
@@ -526,8 +538,15 @@ class Director {
     switch (cmd.intent) {
       case 'move':
         if (cmd.dir) {
-          this.setOrder({ kind: 'move', dir: cmd.dir });
-          this.lastDid = `WENT ${cmd.dir.toUpperCase()}.`;
+          if (cmd.amount) {
+            // Nudge: fixed distance, then the sim emits order_done + halts.
+            // No line on completion — silence is fine, it did the thing.
+            this.setOrder({ kind: 'move', dir: cmd.dir, distancePx: cmd.amount === 'bit' ? 20 : 16 });
+            this.lastDid = `WENT ${cmd.dir.toUpperCase()} A BIT.`;
+          } else {
+            this.setOrder({ kind: 'move', dir: cmd.dir });
+            this.lastDid = `WENT ${cmd.dir.toUpperCase()}.`;
+          }
           this.saidWalkClaim = false;
         }
         break;
@@ -602,6 +621,12 @@ class Director {
     sim.setOrder(this.state, null); // parked — frozen halts enemies, not orders
     this.state.frozen = true;
     this.ui.phase = 'ceremony';
+    // On-feed CRT card mirrors what the robot reads aloud. Selection stays voice-only.
+    this.ui.ceremonyOptions = options.map((id) => ({
+      id,
+      name: CHIPS[id].spoken.toUpperCase(),
+      blurb: CHIPS[id].blurb,
+    }));
     for (const chip of options) this.speech.sayBank(CHIPS[chip].crateLineId, 'beat', 350);
     this.speech.sayBank('crate_which', 'beat');
     logEvent('ceremony_start', { floor });
@@ -619,7 +644,8 @@ class Director {
     if (this.ceremony.floor !== this.state.floorIndex + 1) return; // stale ceremony
     const floor = this.ceremony.floor;
     this.ceremony = null;
-    sim.openCrate(this.state, `crate_${chip}`);
+    this.ui.ceremonyOptions = null;
+    sim.openCrate(this.state, 'crate_triad');
     sim.applyChip(this.state, chip);
     this.ui.glyphs = [...this.state.robot.chips];
     this.audio.playSfx('powerup');
@@ -705,7 +731,9 @@ class Director {
         case 'crate_reached': {
           const floor = this.state.floorIndex + 1;
           if (ev.id === 'crate_EARS') this.earsCeremony();
-          else if (TRIADS[floor] && !this.ceremony) this.startCeremony(floor);
+          else if (ev.id === 'crate_triad' && TRIADS[floor] && !this.ceremony) {
+            this.startCeremony(floor);
+          }
           break;
         }
         case 'fuse_pickup':
@@ -760,6 +788,7 @@ class Director {
     }
     // A ceremony abandoned at the doors dies with its floor.
     this.ceremony = null;
+    this.ui.ceremonyOptions = null;
     this.state.frozen = false;
     this.ui.phase = 'play';
     this.speech.clear();
@@ -816,6 +845,7 @@ class Director {
     this.render.fx.deadCam(false);
     this.state = sim.initialState((Date.now() % 2147483647) | 0);
     this.ceremony = null;
+    this.ui.ceremonyOptions = null;
     this.awaitingName = false;
     this.awaitingFirstOrder = true;
     this.armWaitLadder();

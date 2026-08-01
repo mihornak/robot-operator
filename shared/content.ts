@@ -9,7 +9,7 @@ export interface ChipDef {
   /** What the crate-read ceremony bank line is called. */
   crateLineId: string;
   installLineId: string;
-  blurb: string; // for logs/death card only, never UI text walls
+  blurb: string; // options-card line — MUST fit 2 short lines
 }
 
 export const CHIPS: Record<ChipId, ChipDef> = {
@@ -18,42 +18,42 @@ export const CHIPS: Record<ChipId, ChipDef> = {
     spoken: 'magnet',
     crateLineId: 'crate_magnet',
     installLineId: 'install_magnet',
-    blurb: 'Scrap magnet; detours to loot mid-combat.',
+    blurb: 'Loves shiny. Detours for scrap.',
   },
   RAGE: {
     id: 'RAGE',
     spoken: 'rage',
     crateLineId: 'crate_rage',
     installLineId: 'install_rage',
-    blurb: '+50% damage; will not disengage from a visible enemy.',
+    blurb: 'Hits harder. Never backs down.',
   },
   SCARED: {
     id: 'SCARED',
     spoken: 'scared',
     crateLineId: 'crate_scared',
     installLineId: 'install_scared',
-    blurb: '+30% speed; auto-flees below 50% HP regardless of orders.',
+    blurb: 'Faster. Runs at half health.',
   },
   MEMORY: {
     id: 'MEMORY',
     spoken: 'memory',
     crateLineId: 'crate_memory',
     installLineId: 'install_memory',
-    blurb: 'Keeps his name across floors. The emotional pick.',
+    blurb: 'Remembers. Keeps his name.',
   },
   ZAP: {
     id: 'ZAP',
     spoken: 'zap',
     crateLineId: 'crate_zap',
     installLineId: 'install_zap',
-    blurb: '+damage, faster shots.',
+    blurb: 'Bigger pew pew, faster.',
   },
   TOUGH: {
     id: 'TOUGH',
     spoken: 'tough',
     crateLineId: 'crate_tough',
     installLineId: 'install_tough',
-    blurb: '+50% max HP, knockback resist.',
+    blurb: 'More health. Shrugs off hits.',
   },
 };
 

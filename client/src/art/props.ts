@@ -60,6 +60,64 @@ export function drawCrate(p: Px, frame: number): void {
   }
 }
 
+/** crate_triad 16×14 — THE ceremony case. Latched drab supply shell; warm
+ *  amber-white light leaks through the lid seam, keyhole and vents. 4-frame
+ *  beacon pulse: dim → rising → PEAK (1px halo bloom) → afterglow (smaller
+ *  bloom). The shell never brightens — only its light does (palette law:
+ *  the leak is a beacon warmth like the OSD; body stays desaturated). */
+export function drawCrateTriad(p: Px, frame: number): void {
+  const lvl = [0, 1, 3, 2][frame]; // intensity: dim, rising, PEAK, afterglow
+  const seam = [FX.glowWarm, FX.glowWarmHi, ROBOT.eye, ROBOT.eye][lvl];
+  const core = [FX.glowWarmHi, ROBOT.eye, ROBOT.eyeCore, ROBOT.eyeCore][lvl];
+
+  // drab shell
+  p.hl(3, 0, 10, MAT.drabHi); // lid top edge
+  p.r(2, 1, 12, 3, MAT.drab); // lid
+  p.vl(2, 1, 3, MAT.drabHi);
+  p.vl(13, 1, 3, MAT.drabSh);
+  p.r(1, 5, 14, 7, MAT.drab); // lower shell
+  p.vl(1, 5, 7, MAT.drabHi);
+  p.vl(14, 5, 7, MAT.drabSh);
+  p.hl(2, 11, 12, MAT.drabSh);
+  p.hl(3, 12, 10, G.g2); // underside
+  p.p(2, 13, G.g2); // feet
+  p.p(13, 13, G.g2);
+  p.p(5, 10, MAT.drabHi); // stencil ticks
+  p.p(6, 10, MAT.drabHi);
+  p.p(9, 10, MAT.drabHi);
+
+  // light leaking through the lid seam
+  p.hl(2, 4, 12, seam);
+  p.p(7, 4, core); // hottest at center
+  p.p(8, 4, core);
+  // latches clamp across the seam and interrupt the leak
+  p.vl(4, 3, 3, MAT.metal);
+  p.p(4, 3, MAT.metalHi);
+  p.vl(11, 3, 3, MAT.metal);
+  p.p(11, 3, MAT.metalHi);
+
+  // keyhole + vents on the front face, lit from inside
+  p.r(6, 6, 3, 3, G.g1); // keyhole recess
+  p.p(7, 6, core);
+  p.p(7, 7, seam);
+  p.hl(3, 8, 2, seam); // vent slots
+  p.hl(11, 8, 2, seam);
+
+  // 1px halo bloom on the peak frames
+  if (lvl >= 2) {
+    const halo = lvl === 3 ? FX.glowWarmHi : FX.glowWarm;
+    p.p(1, 4, halo); // seam light escaping past the shell
+    p.p(14, 4, halo);
+    if (lvl === 3) {
+      p.p(0, 4, FX.glowWarm); // outer halo, dimmest
+      p.p(15, 4, FX.glowWarm);
+      p.p(2, 4, core); // seam ends flare
+      p.p(13, 4, core);
+      p.hl(6, 13, 4, FX.glowWarm); // spill onto the floor under the keyhole
+    }
+  }
+}
+
 /** pedestal 18×8 — low charging plinth, 2-frame glow pulse. */
 export function drawPedestal(p: Px, frame: number): void {
   p.hl(2, 2, 14, G.g6); // top surface
@@ -76,6 +134,9 @@ export function drawPedestal(p: Px, frame: number): void {
     p.hl(4, 5, 10, FX.tealHi);
     p.p(3, 5, FX.teal);
     p.p(14, 5, FX.teal);
+    p.p(8, 5, FX.sparkCore); // white-hot charge pips — the pulse must
+    p.p(9, 5, FX.sparkCore); // survive 1x + vignette
+    p.hl(4, 6, 10, G.g1); // dark groove under the lit strip: contrast
   }
 }
 
@@ -93,6 +154,7 @@ export function drawFuse(p: Px, _frame: number): void {
   p.box(1, 3, 4, 5, MAT.ceramicSh);
   p.r(2, 4, 2, 3, ROBOT.eye);
   p.p(2, 4, ROBOT.eyeCore);
+  p.p(3, 5, ROBOT.eyeCore); // glass glint — window must read lit at 1x
   p.p(3, 6, '#a06e2e');
 }
 

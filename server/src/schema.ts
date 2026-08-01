@@ -31,6 +31,10 @@ export const INTENTS = [
 
 export const DIRS = ['up', 'down', 'left', 'right'] as const satisfies readonly Dir[];
 
+export const AMOUNTS = ['bit', 'step'] as const satisfies readonly NonNullable<
+  ParsedCommand['amount']
+>[];
+
 export const CHIP_IDS = [
   'MAGNET',
   'RAGE',
@@ -57,6 +61,9 @@ export const ENTITY_KINDS = [
 type AssertExhaustive<T extends never> = T;
 type _Intents = AssertExhaustive<Exclude<IntentType, (typeof INTENTS)[number]>>;
 type _Dirs = AssertExhaustive<Exclude<Dir, (typeof DIRS)[number]>>;
+type _Amounts = AssertExhaustive<
+  Exclude<NonNullable<ParsedCommand['amount']>, (typeof AMOUNTS)[number]>
+>;
 type _Chips = AssertExhaustive<Exclude<ChipId, (typeof CHIP_IDS)[number]>>;
 type _Kinds = AssertExhaustive<Exclude<EntityKind, (typeof ENTITY_KINDS)[number]>>;
 
@@ -88,6 +95,7 @@ export const parseRequestSchema = z.object({
 export const llmOutputSchema = z.object({
   intent: z.enum(INTENTS),
   dir: z.enum(DIRS).nullish(),
+  amount: z.enum(AMOUNTS).nullish(),
   target: z.string().nullish(),
   choice: z.enum(CHIP_IDS).nullish(),
   name: z.string().nullish(),
@@ -127,6 +135,7 @@ export function toParsedCommand(raw: unknown, req: ParseRequest): ParsedCommand 
     case 'move':
       if (!v.dir) return null;
       cmd.dir = v.dir;
+      if (v.amount) cmd.amount = v.amount;
       break;
     case 'goto':
     case 'attack':

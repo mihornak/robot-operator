@@ -110,6 +110,16 @@ const ORDINALS: Record<string, number> = {
 };
 /** Bare number words are picks only in terse utterances or after "number". */
 const NUMBER_WORDS = new Set(['one', 'two', 'three']);
+/** Nudge magnitudes: "a bit"-family → 'bit', "one step"-family → 'step'. */
+const BIT_WORDS = new Set(['bit', 'little', 'slightly', 'touch', 'tad', 'smidge']);
+const STEP_WORDS = new Set(['step', 'steps']);
+const HELP_PHRASES = [
+  'what can you do',
+  'what do you know',
+  'how does this work',
+  'what do you do',
+  'what can robot do',
+];
 /** norm() strips apostrophes, so "don't" arrives as "dont". */
 const NEGATIONS = new Set(['dont', 'not', 'never', 'no']);
 
@@ -206,6 +216,10 @@ function interpret(
 
   // triad ceremony: chip names, ordinals, indifference
   if (ctx.options && ctx.options.length > 0) {
+    // ceremony help: the robot's one ability right now is choosing
+    if (tokens.includes('help') || HELP_PHRASES.some((p) => text.includes(p))) {
+      return { intent: 'chatter', ack_line: 'ROBOT CHOOSES NOW. SAY CRATE WORD.' };
+    }
     for (const c of ctx.options) {
       const spoken = CHIPS[c].spoken;
       if (tokens.some((t) => t === spoken || t.startsWith(spoken) || (t.length > 2 && spoken.startsWith(t)))) {
@@ -236,11 +250,32 @@ function interpret(
     return { intent: 'clarify', ack_line: 'ROBOT HEARD NO-GO. WHICH WAY?' };
   }
 
+  const dir = tokens.map((t) => DIR_WORDS[t]).find((d): d is Dir => d !== undefined);
+  const amount = tokens.some((t) => STEP_WORDS.has(t))
+    ? ('step' as const)
+    : tokens.some((t) => BIT_WORDS.has(t))
+      ? ('bit' as const)
+      : undefined;
+
+  // "go left a bit and stop" is ONE nudge (the move halts itself) — nudge beats the stop word.
+  if (dir && amount) {
+    return { intent: 'move', dir, amount, ack_line: `ROBOT GOES ${dir.toUpperCase()}. SMALL GO.` };
+  }
+
   if (tokens.some((t) => STOPS.has(t))) return { intent: 'stop', ack_line: 'ROBOT STOPS.' };
 
-  for (const t of tokens) {
-    const d = DIR_WORDS[t];
-    if (d) return { intent: 'move', dir: d, ack_line: `ROBOT GOES ${d.toUpperCase()}.` };
+  if (dir) return { intent: 'move', dir, ack_line: `ROBOT GOES ${dir.toUpperCase()}.` };
+
+  // help: proud capability listing, tier-appropriate
+  if (
+    HELP_PHRASES.some((p) => text.includes(p)) ||
+    (tokens.includes('help') &&
+      !tokens.some((t) => GOTO_VERBS.has(t) || PICKUP_VERBS.has(t) || ATTACK_VERBS.has(t)))
+  ) {
+    return {
+      intent: 'chatter',
+      ack_line: ctx.tier >= 1 ? 'ROBOT GOES TO THINGS. SAY THING.' : 'ROBOT KNOWS GO, STOP, SHOOT.',
+    };
   }
 
   // tier 1+: named targets

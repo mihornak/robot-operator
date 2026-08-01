@@ -149,7 +149,7 @@ function collectScrap(state: SimState, e: Entity): void {
   emit(state, 'scrap_pickup', e.id);
 }
 
-function executeOrder(state: SimState, order: Order | null): void {
+function executeOrder(state: SimState, order: Order | null, scratch: RobotScratch): void {
   const r = state.robot;
   if (order === null) {
     halt(r);
@@ -159,6 +159,16 @@ function executeOrder(state: SimState, order: Order | null): void {
     case 'move': {
       const moved = moveAndFace(state, dirToVec(order.dir));
       bumpCheck(state, moved, r.speed * DT);
+      // Nudge ("a bit" / "one step"): stop after distancePx of ACTUAL travel.
+      // Wall bumps still interrupt via bumpCheck above (order may be cleared).
+      if (order.distancePx !== undefined && r.order === order) {
+        scratch.moveTraveledPx += moved;
+        if (scratch.moveTraveledPx >= order.distancePx) {
+          halt(r);
+          r.order = null;
+          emit(state, 'order_done');
+        }
+      }
       return;
     }
     case 'stop': {
@@ -391,7 +401,7 @@ export function stepRobot(state: SimState, scratch: RobotScratch): void {
     return;
   }
 
-  executeOrder(state, order);
+  executeOrder(state, order, scratch);
   easeHead(r);
 }
 

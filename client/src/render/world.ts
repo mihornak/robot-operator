@@ -36,10 +36,12 @@ const KIND_ART: Record<Entity['kind'], ArtName> = {
 interface EntView {
   root: Container;
   body: Sprite;
-  extra: Sprite | null; // pedestal / glow
-  pool: Sprite | null; // radial light pool (pedestal teal / cable arc light)
+  extra: Sprite | null; // pedestal / glow / socket halo
+  pool: Sprite | null; // radial light pool (pedestal teal / warm beacon / cable arc light)
   poolFlash: number; // cable: brief pool surge on each spark burst
   kind: Entity['kind'];
+  art: ArtName; // resolved art entry (id 'crate_triad' overrides the kind default)
+  triad: boolean; // THE shiny ceremony crate
   phase: number; // stable per-id anim phase offset
   rng: () => number;
   interp: Interp | null; // enemies only
@@ -71,7 +73,15 @@ export class WorldView {
   private shadowTex: Texture;
   private poolTealTex: Texture;
   private poolSparkTex: Texture;
+  private poolWarmTex: Texture; // triad crate / EARS crate / fuse / elevator B
   private robotShadow: Sprite;
+  // ambient dust motes: 1px, drift through light pools ONLY, pooled, max 8 alive
+  private moteLayer = new Container();
+  private motes: Array<{ sp: Sprite; vx: number; vy: number; life: number; age: number; phase: number }> = [];
+  private motePool: Sprite[] = [];
+  private moteT = 0.6;
+  private moteRng = makeRng(0xd05f);
+  private moteSpots: Array<{ x: number; y: number; rx: number; ry: number }> = []; // reusable gather buffer
 
   constructor(private art: ArtAtlas) {
     this.fx = new FxSystem(art);
@@ -81,12 +91,13 @@ export class WorldView {
     this.shadowTex = glowTex(32, 'rgba(0,0,0,0.85)');
     this.poolTealTex = glowTex(48, 'rgba(81,125,116,0.6)');
     this.poolSparkTex = glowTex(56, 'rgba(127,212,255,0.6)');
+    this.poolWarmTex = glowTex(48, 'rgba(255,195,107,0.55)');
     this.robotShadow = new Sprite(this.shadowTex);
     this.robotShadow.anchor.set(0.5);
     this.robotShadow.scale.set(20 / 32, 8 / 32);
     this.robotShadow.alpha = 0.32;
     this.entLayer.addChild(this.robotShadow);
-    this.container.addChild(this.tiles, this.entLayer, this.projLayer, this.fx.container);
+    this.container.addChild(this.tiles, this.entLayer, this.moteLayer, this.projLayer, this.fx.container);
   }
 
   // --------------------------------------------------------------- events
@@ -204,6 +215,7 @@ export class WorldView {
     this.robotShadow.position.set(this.robot.container.x, this.robot.container.y + 6);
     this.robotShadow.zIndex = this.robot.container.zIndex - 0.5;
     this.fx.update(dt);
+    this.updateMotes(dt);
   }
 
   // -------------------------------------------------------------- tilemap
@@ -213,6 +225,11 @@ export class WorldView {
     this.closing.clear();
     this.elevBRamp = -1;
     this.fx.clear();
+    for (const m of this.motes) {
+      m.sp.visible = false;
+      this.motePool.push(m.sp);
+    }
+    this.motes.length = 0;
     this.tiles.removeChildren().forEach((c) => c.destroy({ children: true }));
     for (const [, v] of this.views) v.root.destroy({ children: true });
     this.views.clear();
@@ -267,7 +284,8 @@ export class WorldView {
 
   private createView(e: Entity): EntView {
     const root = new Container();
-    const name = KIND_ART[e.kind];
+    const triad = e.id === 'crate_triad';
+    const name: ArtName = triad ? 'crate_triad' : KIND_ART[e.kind];
     const body = new Sprite(tex(this.art, name));
     const [ax, ay] = anchorOf(name);
     body.anchor.set(ax, ay);
@@ -285,9 +303,19 @@ export class WorldView {
       root.addChild(sh);
     }
 
-    if (e.kind === 'crate') {
-      // cool charging pool grounds the pedestal in the dark
-      pool = new Sprite(this.poolTealTex);
+    if (triad) {
+      // THE shiny crate: warm beacon pool, no pedestal — it glows on its own
+      pool = new Sprite(this.poolWarmTex);
+      pool.anchor.set(0.5);
+      pool.blendMode = 'add';
+      pool.scale.set(1.3, 0.6);
+      pool.y = 6;
+      pool.alpha = 0.22;
+      root.addChild(pool);
+    } else if (e.kind === 'crate') {
+      // charging pool grounds the pedestal in the dark; the EARS crate IS a
+      // shiny crate conceptually — same warm pool as crate_triad, others teal
+      pool = new Sprite(e.id === 'crate_EARS' ? this.poolWarmTex : this.poolTealTex);
       pool.anchor.set(0.5);
       pool.blendMode = 'add';
       pool.scale.set(1.05, 0.5);
@@ -308,9 +336,29 @@ export class WorldView {
       pool.y = 1;
       pool.alpha = 0.06;
       root.addChild(pool);
+    } else if (e.kind === 'fuse') {
+      // small warm pool — the fragile carryable must be findable in the dark
+      pool = new Sprite(this.poolWarmTex);
+      pool.anchor.set(0.5);
+      pool.blendMode = 'add';
+      pool.scale.set(0.55, 0.28);
+      pool.y = 4;
+      pool.alpha = 0.08;
+      root.addChild(pool);
+    } else if (e.kind === 'fuseSocket') {
+      // additive self-copy behind the body = outline halo; lit only while the
+      // robot carries the fuse (updateEntity) — powered-off before
+      extra = new Sprite(tex(this.art, 'fuse_socket'));
+      extra.anchor.set(0.5);
+      extra.blendMode = 'add';
+      extra.tint = 0xffc36b;
+      extra.scale.set(1.3);
+      extra.alpha = 0;
+      extra.visible = false;
+      root.addChild(extra);
     } else if (e.kind === 'elevatorB') {
       // warm floor pool spilling out of the lit shaft, pulses when powered
-      extra = new Sprite(glowTex(48, 'rgba(255,195,107,0.55)'));
+      extra = new Sprite(this.poolWarmTex);
       extra.anchor.set(0.5);
       extra.blendMode = 'add';
       extra.y = 4;
@@ -327,6 +375,8 @@ export class WorldView {
       pool,
       poolFlash: 0,
       kind: e.kind,
+      art: name,
+      triad,
       phase: (hashStr(e.id) % 1000) / 100,
       rng: makeRng(hashStr(e.id)),
       interp: isEnemy ? new Interp() : null,
@@ -354,8 +404,8 @@ export class WorldView {
       y = v.interp.y(view.alpha);
     }
     v.root.position.set(x, y);
-    const entry = ART[KIND_ART[e.kind]];
-    const [, ay] = anchorOf(KIND_ART[e.kind]);
+    const entry = ART[v.art];
+    const [, ay] = anchorOf(v.art);
     v.root.zIndex = e.kind === 'cable' ? y - 100 : y + entry.h * (1 - ay); // cables lie flat on the floor
 
     // dead fade-out
@@ -393,6 +443,47 @@ export class WorldView {
         break;
       }
       case 'crate': {
+        if (v.triad) {
+          // THE shiny crate — beacon pulse + breathing warm pool + star glints.
+          // Most eye-catching thing on the floor after the robot (elevator B
+          // stays dark on ceremony floors until this resolves).
+          const fs = frames(this.art, 'crate_triad');
+          const off = e.state === 'open' || e.dead === true;
+          if (off) {
+            // resolved: stop pulsing, dim, pool off
+            v.body.texture = fs[0]!;
+            if (v.flashMs <= 0) v.body.tint = 0x8a8f96;
+            if (v.pool) v.pool.visible = false;
+          } else {
+            const cyc = ((t + v.phase) * 0.8) % 1; // ~1.25s beacon period
+            v.body.texture = fs[Math.floor(cyc * fs.length) % fs.length]!;
+            const pulse = 0.5 + 0.5 * Math.sin(cyc * Math.PI * 2);
+            if (v.pool) {
+              v.pool.visible = true;
+              v.pool.alpha = 0.2 + 0.14 * pulse;
+              const s = 1 + 0.07 * pulse;
+              v.pool.scale.set(s * 1.3, s * 0.6);
+            }
+            // occasional star-glint floating off the seams
+            v.sparkT -= dt;
+            if (v.sparkT <= 0) {
+              v.sparkT = 1.5 + v.rng() * 1.3;
+              this.fx.spawn({
+                x: x + (v.rng() - 0.5) * 10,
+                y: y - 8 - v.rng() * 4,
+                tex: frames(this.art, 'fx_spark'),
+                fps: 10,
+                life: 0.45,
+                vy: -14,
+                fade: true,
+                loop: true,
+                blend: 'add',
+                scale: 0.7,
+              });
+            }
+          }
+          break;
+        }
         const fs = frames(this.art, 'crate');
         const open = e.state === 'open';
         v.body.texture = fs[open ? 1 : 0]!;
@@ -409,6 +500,9 @@ export class WorldView {
         }
         if (v.pool) {
           if (e.dead && e.state !== 'open') v.pool.visible = false; // unchosen sibling powers down
+          else if (e.id === 'crate_EARS')
+            // warm shiny-crate pool, slower breathe than the teal chargers
+            v.pool.alpha = 0.11 + 0.08 * (0.5 + 0.5 * Math.sin((t + v.phase) * 3));
           else v.pool.alpha = 0.06 + 0.05 * (0.5 + 0.5 * Math.sin((t + v.phase) * 5));
         }
         break;
@@ -452,13 +546,45 @@ export class WorldView {
         v.body.texture = fs[(t + v.phase) % 2.4 < 0.18 ? 1 : 0]!; // peaceful LED blink
         break;
       }
-      case 'fuse':
+      case 'fuse': {
         v.root.visible = sim.robot.carrying !== e.id; // carried fuse rides the robot
+        if (v.root.visible) {
+          if (v.pool) v.pool.alpha = 0.07 + 0.05 * (0.5 + 0.5 * Math.sin((t + v.phase) * 2.4));
+          // slow amber glint every ~2s — "this one matters" at a glance
+          v.sparkT -= dt;
+          if (v.sparkT <= 0) {
+            v.sparkT = 1.7 + v.rng() * 0.7;
+            this.fx.spawn({
+              x: x + (v.rng() - 0.5) * 4,
+              y: y - 5,
+              tex: frames(this.art, 'fx_spark'),
+              fps: 8,
+              life: 0.5,
+              vy: -10,
+              fade: true,
+              loop: true,
+              blend: 'add',
+              scale: 0.55,
+              tint: 0xffc36b,
+            });
+          }
+        }
         break;
+      }
       case 'fuseSocket': {
         const fs = frames(this.art, 'fuse_socket');
         const filled = e.state === 'filled' || this.elevBRamp >= 0;
         v.body.texture = fs[filled ? 1 : 0]!;
+        if (v.extra) {
+          // faint pulsing outline halo while the robot carries the fuse —
+          // shows where it goes; powered-off (invisible) before
+          const want = !filled && sim.robot.carrying !== null;
+          v.extra.visible = want;
+          if (want) {
+            v.extra.texture = v.body.texture;
+            v.extra.alpha = 0.08 + 0.1 * (0.5 + 0.5 * Math.sin(t * 3.4));
+          }
+        }
         break;
       }
       case 'elevatorA':
@@ -500,5 +626,79 @@ export class WorldView {
     v.body.tint = powered
       ? lerpColor(0xffffff, 0xffdfae, 0.35 * pulse * ramp)
       : 0x70747c;
+  }
+
+  // ------------------------------------------------------------ dust motes
+
+  /** Collect glowing light pools into the reusable spot buffer; returns count. */
+  private gatherMoteSpots(): number {
+    let n = 0;
+    for (const v of this.views.values()) {
+      if (!v.root.visible) continue;
+      let src: Sprite | null = null;
+      if (v.pool && v.pool.visible && v.pool.alpha > 0.04) src = v.pool;
+      else if (v.kind === 'elevatorB' && v.extra && v.extra.visible && v.extra.alpha > 0.05)
+        src = v.extra;
+      if (!src) continue;
+      let s = this.moteSpots[n];
+      if (!s) {
+        s = { x: 0, y: 0, rx: 0, ry: 0 };
+        this.moteSpots.push(s);
+      }
+      s.x = v.root.x + src.x;
+      s.y = v.root.y + src.y;
+      s.rx = Math.max(4, 22 * src.scale.x);
+      s.ry = Math.max(3, 22 * src.scale.y);
+      n++;
+    }
+    return n;
+  }
+
+  private makeMote(): Sprite {
+    const sp = new Sprite(Texture.WHITE);
+    sp.width = 1;
+    sp.height = 1;
+    sp.tint = 0xffe9c8;
+    sp.blendMode = 'add';
+    this.moteLayer.addChild(sp);
+    return sp;
+  }
+
+  /** Sparse 1px dust drifting through light pools. Free when nothing glows. */
+  private updateMotes(dt: number): void {
+    for (let i = this.motes.length - 1; i >= 0; i--) {
+      const m = this.motes[i]!;
+      m.age += dt;
+      if (m.age >= m.life) {
+        m.sp.visible = false;
+        this.motePool.push(m.sp);
+        this.motes.splice(i, 1);
+        continue;
+      }
+      m.sp.x += (m.vx + Math.sin(this.t * 1.2 + m.phase) * 2.2) * dt;
+      m.sp.y += m.vy * dt;
+      m.sp.alpha = 0.16 * Math.min(1, m.age / 0.9, (m.life - m.age) / 0.9);
+    }
+    this.moteT -= dt;
+    if (this.moteT > 0 || this.motes.length >= 8) return;
+    this.moteT = 0.35 + this.moteRng() * 0.55;
+    const n = this.gatherMoteSpots();
+    if (n === 0) return; // no light pools on screen — no dust, no cost
+    const s = this.moteSpots[Math.floor(this.moteRng() * n)]!;
+    const sp = this.motePool.pop() ?? this.makeMote();
+    sp.visible = true;
+    sp.alpha = 0;
+    sp.position.set(
+      s.x + (this.moteRng() * 2 - 1) * s.rx,
+      s.y + (this.moteRng() * 2 - 1) * s.ry,
+    );
+    this.motes.push({
+      sp,
+      vx: (this.moteRng() - 0.5) * 5,
+      vy: -(1.5 + this.moteRng() * 3),
+      life: 2.6 + this.moteRng() * 2,
+      age: 0,
+      phase: this.moteRng() * Math.PI * 2,
+    });
   }
 }

@@ -26,6 +26,16 @@ const DIR_WORDS: Record<string, Dir> = {
 };
 
 const STOP_WORDS = ['stop', 'halt', 'wait', 'freeze', 'stay', 'whoa', 'woah', 'brake'];
+/** Nudge magnitudes: "a bit"-family → 'bit', "one step"-family → 'step'. */
+const BIT_WORDS = ['bit', 'little', 'slightly', 'touch', 'tad', 'smidge'];
+const STEP_WORDS = ['step', 'steps'];
+const HELP_PHRASES = [
+  'what can you do',
+  'what do you know',
+  'how does this work',
+  'what do you do',
+  'what can robot do',
+];
 const SHOOT_WORDS = ['shoot', 'fire', 'pew', 'blast', 'attack', 'kill'];
 const ATTACK_VERBS = ['attack', 'kill', 'shoot', 'fire', 'destroy', 'fight', 'smash', 'blast', 'zap'];
 const PICKUP_VERBS = ['pick', 'grab', 'take', 'get', 'fetch', 'collect', 'carry'];
@@ -125,6 +135,10 @@ function parseName(toks: string[]): ParsedCommand {
 }
 
 function parseTriad(text: string, toks: string[], options: ChipId[], name: string): ParsedCommand {
+  // Ceremony help: the robot's one ability right now is choosing.
+  if (toks.includes('help') || HELP_PHRASES.some((p) => text.includes(p))) {
+    return { intent: 'chatter', ack_line: `${name} CHOOSES NOW. SAY CRATE WORD.` };
+  }
   if (INDIFFERENT.some((p) => text.includes(p))) {
     return { intent: 'robot_choice', ack_line: `${name} PICKS. ${name} HAS TASTE.` };
   }
@@ -157,14 +171,32 @@ export function serverLocalParse(req: ParseRequest): ParsedCommand {
   if (req.awaitingName) return done(parseName(toks));
   if (req.options && req.options.length > 0) return done(parseTriad(text, toks, req.options, name));
 
+  const dir = toks.map((t) => DIR_WORDS[t]).find((d): d is Dir => Boolean(d));
+  const amount = has(toks, STEP_WORDS) ? ('step' as const) : has(toks, BIT_WORDS) ? ('bit' as const) : undefined;
+
+  // "go left a bit and stop" is ONE nudge (the move halts itself) — nudge beats the stop word.
+  if (dir && amount) {
+    return done({ intent: 'move', dir, amount, ack_line: `${name} GOES ${dir.toUpperCase()}. SMALL ZOOM.` });
+  }
+
   if (has(toks, STOP_WORDS)) {
     return done({ intent: 'stop', ack_line: `${name} STOPS. STOPPING IS EASY.` });
   }
 
-  const dir = toks.map((t) => DIR_WORDS[t]).find((d): d is Dir => Boolean(d));
   if (dir) {
     const tail = req.shouted ? 'FAST FAST.' : 'ZOOM.';
     return done({ intent: 'move', dir, ack_line: `${name} GOES ${dir.toUpperCase()}. ${tail}` });
+  }
+
+  // Help: proud capability listing, tier-appropriate.
+  if (
+    HELP_PHRASES.some((p) => text.includes(p)) ||
+    (toks.includes('help') && !has(toks, GOTO_VERBS) && !has(toks, PICKUP_VERBS) && !has(toks, ATTACK_VERBS))
+  ) {
+    return done({
+      intent: 'chatter',
+      ack_line: req.tier >= 1 ? `${name} GOES TO THINGS. SAY THING.` : `${name} KNOWS GO, STOP, SHOOT.`,
+    });
   }
 
   if (req.tier >= 1) {

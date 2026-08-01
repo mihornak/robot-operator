@@ -138,6 +138,7 @@ export function setOrder(state: SimState, order: Order | null): void {
   const scratch = scratchOf(state);
   scratch.rageNotified = false;
   scratch.magnetTargetId = null; // a fresh order outranks the shiny detour
+  scratch.moveTraveledPx = 0; // nudge distance counts from the fresh order
   if (order === null) {
     r.vel.x = 0;
     r.vel.y = 0;
@@ -192,8 +193,11 @@ export function visibleEntities(state: SimState): ParseEntity[] {
   return out;
 }
 
-/** Director resolved a triad: the chosen crate opens, its option-bearing siblings die.
- *  The optionless crate_EARS never dies as a bystander — only when it IS the choice. */
+/** Director resolved a crate: it opens in place. Triads are ONE shiny crate
+ *  ('crate_triad', floors 2 & 5) whose three chips live on the ceremony card,
+ *  so there are no longer option-bearing siblings to kill — the branch stays
+ *  (harmless) for any future multi-crate floor. The optionless crate_EARS
+ *  never dies as a bystander — only when it IS the choice. */
 export function openCrate(state: SimState, crateId: string): void {
   for (const e of state.entities) {
     if (e.kind !== 'crate' || e.dead) continue;

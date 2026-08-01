@@ -5,9 +5,11 @@
  */
 
 import { Container, Graphics, Sprite, Text, type Texture, TilingSprite } from 'pixi.js';
-import type { ArtAtlas, DeathCard, UiState } from '@shared/types';
+import type { ArtAtlas, ChipId, DeathCard, UiState } from '@shared/types';
 import { VIEW_H, VIEW_W } from '@shared/types';
 import { AMBER, AMBER_DIM, canvasTex, CAVEAT, clamp01, easeOutCubic, frames, lerp, tex, VT323 } from './util';
+
+type CeremonyOption = { id: ChipId; name: string; blurb: string };
 
 const NOTE_TEXT = "IF BROKEN: turn the main computer OFF and ON. It's on floor 15. — M.";
 
@@ -27,6 +29,12 @@ export class Overlays {
   private hintA = 0;
 
   private noteText: Text;
+
+  private ceremony = new Container();
+  private ceremonyData: CeremonyOption[] | null = null;
+  private ceremonyT = 0;
+  private ceremonyCols: Container[] = [];
+  private ceremonySay: Text | null = null;
 
   private card = new Container();
   private cardData: DeathCard | null = null;
@@ -65,12 +73,13 @@ export class Overlays {
     });
 
     this.noteText = this.buildNote();
+    this.ceremony.visible = false;
     this.card.visible = false;
     this.titleSub = vt(13, AMBER_DIM);
     this.buildTitle();
     this.title.visible = false;
 
-    this.container.addChild(this.blackout, this.press, this.hint, this.card, this.title);
+    this.container.addChild(this.blackout, this.press, this.hint, this.ceremony, this.card, this.title);
   }
 
   /** Note is physical paper: crisp above the chunky feed. Set on resize. */
@@ -112,6 +121,85 @@ export class Overlays {
     note.addChild(shadow, paper, text, tape);
     this.noteLayer.addChild(note);
     return text;
+  }
+
+  // ------------------------------------------------------- ceremony card
+
+  /**
+   * Triad options card — same CRT family as the death card, upper third of the
+   * feed (y ~34..108: below the OSD header, above the caption rows). Three
+   * columns: glyph, spoken NAME large, blurb small+dim. Selection stays
+   * voice-only — the footer just says so.
+   */
+  private buildCeremony(opts: CeremonyOption[]): void {
+    this.ceremony.removeChildren().forEach((c) => c.destroy({ children: true }));
+    this.ceremonyCols.length = 0;
+    const W = 320;
+    const H = 74;
+
+    const bg = new Graphics()
+      .roundRect(0, 0, W, H, 4)
+      .fill({ color: 0x060708, alpha: 0.9 })
+      .stroke({ color: 0x3a2c08, width: 1 })
+      .roundRect(3, 3, W - 6, H - 6, 3)
+      .stroke({ color: AMBER, width: 1, alpha: 0.16 });
+
+    const scan = new TilingSprite({ texture: this.cardScanTex, width: W, height: H });
+    scan.alpha = 0.5;
+    this.ceremony.addChild(bg, scan);
+
+    const colW = W / Math.max(1, opts.length);
+    // faint separators between the columns
+    for (let i = 1; i < opts.length; i++) {
+      const sep = new Graphics().rect(0, 0, 1, H - 28).fill({ color: AMBER, alpha: 0.08 });
+      sep.position.set(Math.round(colW * i), 12);
+      this.ceremony.addChild(sep);
+    }
+
+    for (let i = 0; i < opts.length; i++) {
+      const o = opts[i]!;
+      const col = new Container();
+      col.position.set(colW * (i + 0.5), 36); // children centered on col origin → pop scales in place
+
+      const glyph = new Sprite(tex(this.art, `glyph_${o.id}`));
+      glyph.anchor.set(0.5);
+      glyph.scale.set(2);
+      glyph.y = -22;
+
+      const name = vt(16);
+      name.anchor.set(0.5);
+      name.text = o.name.toUpperCase();
+      name.y = -6;
+
+      const blurb = new Text({
+        text: o.blurb,
+        style: {
+          fontFamily: VT323,
+          fontSize: 10,
+          fill: AMBER_DIM,
+          align: 'center',
+          wordWrap: true,
+          wordWrapWidth: colW - 14,
+        },
+      });
+      blurb.anchor.set(0.5, 0);
+      blurb.alpha = 0.85;
+      blurb.y = 4;
+
+      col.addChild(glyph, name, blurb);
+      col.alpha = 0; // pops in staggered, in update
+      this.ceremony.addChild(col);
+      this.ceremonyCols.push(col);
+    }
+
+    this.ceremonySay = vt(10, AMBER_DIM);
+    this.ceremonySay.anchor.set(0.5);
+    this.ceremonySay.text = 'SAY A WORD';
+    this.ceremonySay.position.set(W / 2, H - 9);
+    this.ceremonySay.visible = false;
+    this.ceremony.addChild(this.ceremonySay);
+
+    this.ceremony.x = (VIEW_W - W) / 2;
   }
 
   // ----------------------------------------------------------- death card
@@ -289,6 +377,41 @@ export class Overlays {
       } else {
         this.noteLayer.visible = false;
       }
+    }
+
+    // ceremony options card: slide/fade in 300ms, columns pop staggered 80ms
+    if (ui.ceremonyOptions) {
+      if (ui.ceremonyOptions !== this.ceremonyData) {
+        // options may arrive as a new array mid-ceremony (re-read) — rebuild
+        // content but only restart the slide when coming up from hidden
+        const fresh = this.ceremonyData === null;
+        this.ceremonyData = ui.ceremonyOptions;
+        this.buildCeremony(ui.ceremonyOptions);
+        if (fresh) this.ceremonyT = 0;
+        this.ceremony.visible = true;
+      }
+      this.ceremonyT += dt;
+      const e = easeOutCubic(clamp01(this.ceremonyT / 0.3));
+      this.ceremony.alpha = e;
+      this.ceremony.y = lerp(24, 34, e);
+      for (let i = 0; i < this.ceremonyCols.length; i++) {
+        const col = this.ceremonyCols[i]!;
+        const cp = clamp01((this.ceremonyT - 0.1 - i * 0.08) / 0.2);
+        const b = cp - 1;
+        col.scale.set(0.6 + 0.4 * (1 + b * b * (2.7 * b + 1.7))); // easeOutBack pop
+        col.alpha = cp;
+      }
+      if (this.ceremonySay) {
+        // dim footer, slow blink — the only prompt; selection is voice-only
+        this.ceremonySay.visible = this.ceremonyT > 0.55 && this.t % 2.4 < 1.6;
+      }
+    } else if (this.ceremony.visible) {
+      this.ceremonyData = null;
+      this.ceremony.alpha = Math.max(0, this.ceremony.alpha - dt / 0.25);
+      this.ceremony.y -= 10 * dt; // drifts up as it fades
+      if (this.ceremony.alpha <= 0) this.ceremony.visible = false;
+    } else {
+      this.ceremonyData = null;
     }
 
     // death card slide-in

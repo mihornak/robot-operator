@@ -38,6 +38,10 @@ export const ART = {
   // --- props / pickups ---
   scrap: { frames: 2, w: 8, h: 6 }, // glint frame
   crate: { frames: 2, w: 14, h: 12 }, // closed / open
+  /** THE shiny triad pickup — one per ceremony floor. 4-frame beacon pulse:
+   *  latched case, warm inner light leaking through the seams. Must read as
+   *  "the important thing" from across a dark room. */
+  crate_triad: { frames: 4, w: 16, h: 14 },
   pedestal: { frames: 2, w: 18, h: 8 }, // charging glow pulse
   fuse: { frames: 1, w: 6, h: 10 },
   fuse_socket: { frames: 2, w: 10, h: 12 }, // empty / filled+lit
