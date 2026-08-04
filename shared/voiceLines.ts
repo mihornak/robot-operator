@@ -16,6 +16,7 @@ export const VOICE_BANK: BankLine[] = [
   // --- wake / naming (beat 1) ---
   { id: 'wake_hello', text: 'Hello? … You are voice?' },
   { id: 'wake_sleep', text: 'Robot was sleeping.' },
+  { id: 'wake_pile', text: 'Robot was in the pile. Pile was comfy.' },
   { id: 'wake_name_ask', text: 'Robot has no name. Voice gives name?' },
   { id: 'wake_self_name', text: 'Robot names robot: Robot.' },
   { id: 'what_do', text: 'What robot do?' },
@@ -45,6 +46,13 @@ export const VOICE_BANK: BankLine[] = [
   { id: 'elev_up', text: 'Robot goes up. Up is good.' },
   { id: 'elev_other', text: 'Other elevator. Robot finds it.' },
   { id: 'elev_dark', text: 'Elevator is dark. Crates first.' },
+  // The ONLY thing said at a dead exit. Naming the cure ("crates first", "door
+  // wants fuse") on top of it was two lines where one would do, and the point
+  // of the beat is that the operator works out the way round, not the robot.
+  { id: 'elev_other_way', text: 'Elevator is broken. Need other way.' },
+  // Said instead of the above on any floor that actually HAS a socket: there,
+  // "find another way" is a lie — there is exactly one way, and it is the fuse.
+  { id: 'elev_no_fuse', text: 'No power. Needs fuse.' },
   { id: 'forgot_gag', text: 'Who is…? … Oh. Is robot.' },
 
   // --- triads / ceremonies ---
@@ -82,6 +90,9 @@ export const VOICE_BANK: BankLine[] = [
   { id: 'low_hp', text: 'Robot is leaking. Is fine.' },
   { id: 'pew', text: 'Pew pew.' },
   { id: 'flee', text: 'Robot leaves now. Fast. Bye.' },
+  { id: 'rage_done', text: 'Fine. Robot listens now. Robot won anyway.' },
+  { id: 'explore_go', text: 'Robot explores. Robot is brave.' },
+  { id: 'chip_found', text: 'Chip! Robot eats chip. Robot is bigger now.' },
 
   // --- carry / fuse (floor 4) ---
   { id: 'fuse_grab', text: 'Robot carries. No pew pew now.' },

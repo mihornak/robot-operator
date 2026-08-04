@@ -9,10 +9,25 @@
  * sequence, never serialized mid-run, and restart always goes through
  * initialState() (fresh state → fresh scratch).
  */
-import type { ChipId, Entity, Order, ParseEntity, SimState } from '../../../shared/types';
+import type {
+  ChipId,
+  DirectiveKind,
+  Entity,
+  Order,
+  ParseEntity,
+  SimState,
+  Standing,
+} from '../../../shared/types';
+import { defaultStanding } from '../../../shared/types';
 import { BASE } from '../../../shared/content';
 import { FLOORS, buildSolid } from './floors';
-import { entityById, nearestHostile as nearestHostileEntity, newScratch } from './internal';
+import {
+  applyOrder,
+  entityById,
+  hostileInSight,
+  nearestHostile as nearestHostileEntity,
+  newScratch,
+} from './internal';
 import type { RobotScratch } from './internal';
 import { stepEnemies, stepHazards } from './enemies';
 import { stepProjectiles } from './projectiles';
@@ -55,13 +70,20 @@ export function initialState(seed: number): SimState {
       hp: BASE.hp,
       maxHp: BASE.hp,
       alive: true,
-      tier: 0,
+      dormant: true, // asleep in the floor-1 pile until the player actually speaks
+      // Tier 1 and brain from the first second: nothing the player can SAY is
+      // ever withheld. Upgrades widen what the robot notices (tier 2) and how
+      // much it proposes on its own (ideas), never what it will listen to.
+      tier: 1,
       chips: [],
       name: null,
       hasMemory: false,
-      brain: false,
-      avoidIds: [],
+      brain: true,
+      ideas: false,
+      standing: defaultStanding(),
       order: null,
+      selfDriven: false,
+      awaitingBriefing: true,
       mood: 'ok',
       sulkTicks: 0,
       carrying: null,
@@ -83,9 +105,11 @@ export function initialState(seed: number): SimState {
 
 /**
  * Load a floor: rebuild grid + entities, robot to elevator A, per-floor state
- * reset. hp/chips/tier/scrap/brain/avoidIds persist; without MEMORY the name
- * does not. (avoidIds persisting across floors is deliberate — standing orders
- * outlive dead references; only initialState clears them.)
+ * reset. hp/chips/tier/scrap/ideas persist, and so do the standing orders —
+ * "avoid the machines" is how the player wants the robot PLAYED, not a note
+ * about one room, and re-teaching it every floor is exactly the amnesia this
+ * change exists to kill. Only the avoid-LIST is dropped, because entity ids
+ * belong to the floor that spawned them. Without MEMORY the name still goes.
  */
 export function loadFloor(state: SimState, floorIndex: number): void {
   const def = FLOORS[floorIndex];
@@ -99,15 +123,22 @@ export function loadFloor(state: SimState, floorIndex: number): void {
   const r = state.robot;
   const a = entityById(state, 'elevA');
   const b = entityById(state, 'elevB');
-  r.pos = a ? { x: a.pos.x, y: a.pos.y } : { x: 40, y: 136 };
+  const spawn = def.spawn ?? a?.pos ?? { x: 40, y: 136 };
+  r.pos = { x: spawn.x, y: spawn.y };
   r.vel.x = 0;
   r.vel.y = 0;
   r.order = null;
+  r.selfDriven = false;
+  // A new floor is a new briefing. The robot holds at the doors and reports;
+  // walking out of the lift already busy is how floor 2 started roaming.
+  r.awaitingBriefing = true;
+  r.standing.roam = false; // "do your own thing" was about THAT room, not forever
   r.carrying = null;
   r.mood = 'ok';
   r.sulkTicks = 0;
   r.wallBumpTicks = 0;
   r.shootCd = 0;
+  r.standing.avoidIds = []; // ids died with the old floor; the policy survives
   if (!r.hasMemory) r.name = null; // the forgetting gag
   if (b) {
     r.facing = Math.atan2(b.pos.y - r.pos.y, b.pos.x - r.pos.x);
@@ -135,19 +166,86 @@ export function step(state: SimState): void {
   proximityTriggers(state);
 }
 
+/**
+ * Install a PLAYER order (clears the self-driven flag).
+ *
+ * A REAL order also ends the briefing hold — but clearing the order does not.
+ * The director parks the robot with setOrder(null) right after a floor loads,
+ * and letting that count as "being told something" silently cancelled the very
+ * hold the floor change had just armed.
+ */
 export function setOrder(state: SimState, order: Order | null): void {
-  const r = state.robot;
-  r.order = order;
-  r.wallBumpTicks = 0;
-  const scratch = scratchOf(state);
-  scratch.rageNotified = false;
-  scratch.magnetTargetId = null; // a fresh order outranks the shiny detour
-  scratch.moveTraveledPx = 0; // nudge distance counts from the fresh order
-  scratch.hideTarget = null; // a fresh hide order picks cover anew
-  if (order === null) {
-    r.vel.x = 0;
-    r.vel.y = 0;
+  if (order !== null) state.robot.awaitingBriefing = false;
+  applyOrder(state, scratchOf(state), order, false);
+}
+
+/** The player said something directive but gave no order (a standing rule, a
+ *  yes, a plan). That still counts as being briefed. */
+export function clearBriefing(state: SimState): void {
+  state.robot.awaitingBriefing = false;
+}
+
+/**
+ * Fold spoken directives into the standing orders. Each pair is exclusive, so
+ * "fight everything" really does cancel an earlier "avoid the machines" —
+ * accumulating contradictory policies is how a robot starts looking possessed.
+ * Returns the resolved standing orders for the caller to display.
+ */
+export function applyDirectives(state: SimState, kinds: readonly DirectiveKind[]): Standing {
+  const st = state.robot.standing;
+  for (const k of kinds) {
+    switch (k) {
+      case 'avoid_enemies':
+        st.avoidEnemies = true;
+        st.fight = false;
+        st.hunt = false;
+        break;
+      case 'fight_enemies':
+        // "Fight everything" is the ONLY thing that sends the robot looking
+        // for trouble. Plain `fight` is shooting back at what already found it.
+        st.avoidEnemies = false;
+        st.fight = true;
+        st.hunt = true;
+        break;
+      case 'avoid_hazards':
+        st.avoidHazards = true;
+        break;
+      case 'ignore_hazards':
+        st.avoidHazards = false;
+        break;
+      case 'gather':
+        st.gather = true;
+        break;
+      case 'no_gather':
+        st.gather = false;
+        break;
+      case 'careful':
+        st.careful = true;
+        break;
+      case 'bold':
+        st.careful = false;
+        break;
+      case 'act_alone':
+        st.autonomy = true;
+        st.roam = true;
+        break;
+      case 'wait_for_orders':
+        st.autonomy = false;
+        st.roam = false;
+        break;
+    }
   }
+  return st;
+}
+
+/** Director-owned suppression of self-initiative (naming beat, ceremonies). */
+export function setAutonomy(state: SimState, on: boolean): void {
+  state.robot.standing.autonomy = on;
+}
+
+/** True when a hostile is in range AND in view — drives the director's HUD. */
+export function canSeeHostile(state: SimState): boolean {
+  return hostileInSight(state) !== null;
 }
 
 /** Install a chip: stat effects here, behavior effects read from robot.chips. */
@@ -177,16 +275,65 @@ export function applyChip(state: SimState, chip: ChipId): void {
   }
 }
 
-/** Install the BRAIN upgrade (floor 4 crate): hide/avoid/careful/then unlocked. */
+/** BRAIN crate (floor 4): the robot starts volunteering plans of its own. */
 export function applyBrain(state: SimState): void {
   state.robot.brain = true;
+  state.robot.ideas = true;
 }
 
-/** Standing avoid order (BRAIN): robot routes wide around this entity id from
- *  now on. Dedup'd; persists across floors, cleared only by initialState. */
+/** EARS crate (floor 3): sharper senses — wider sight, notices things sooner. */
+export function applyEars(state: SimState): void {
+  state.robot.tier = 2;
+}
+
+/**
+ * The robot climbs out of the opening pile. One-way, idempotent: the director
+ * calls it on the FIRST utterance that actually carried words, so a mic that
+ * isn't working can never fake the relationship beat.
+ */
+export function wakeRobot(state: SimState): void {
+  state.robot.dormant = false;
+  for (const e of state.entities) if (e.kind === 'debris' && e.id === 'pile1') e.state = 'burst';
+}
+
+/** Standing avoid order: robot routes wide around this entity id from now on.
+ *  Dedup'd; dies with the floor that spawned the id (see loadFloor). */
 export function addAvoid(state: SimState, id: string): void {
-  const r = state.robot;
-  if (!r.avoidIds.includes(id)) r.avoidIds.push(id);
+  const ids = state.robot.standing.avoidIds;
+  if (!ids.includes(id)) ids.push(id);
+}
+
+/**
+ * What the robot is doing right now, in plain words. Feeds both the OSD
+ * objective row and the parser context, so "what are you doing?" has a real
+ * answer and the model can tell a new instruction from a repeat of the old one.
+ */
+export function describeOrder(state: SimState): string | null {
+  const o = state.robot.order;
+  if (!o) return null;
+  const label = (id: string): string => entityById(state, id)?.label ?? 'thing';
+  switch (o.kind) {
+    case 'move':
+      return `driving ${o.dir}`;
+    case 'stop':
+      return null;
+    case 'shoot':
+      return 'shooting';
+    case 'goto':
+      return `${o.careful ? 'sneaking' : 'going'} to the ${label(o.targetId)}`;
+    case 'attack':
+      return `fighting the ${label(o.targetId)}`;
+    case 'pickup':
+      return `fetching the ${label(o.targetId)}`;
+    case 'enter':
+      return 'getting in the elevator';
+    case 'explore':
+      return 'exploring';
+    case 'hide':
+      return 'hiding';
+    case 'retreat':
+      return 'backing away';
+  }
 }
 
 /** Live entities with rough bearing + distance, for the LLM parse request. */

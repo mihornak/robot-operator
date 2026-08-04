@@ -12,16 +12,36 @@ import { FxSystem } from './fx';
 import { RobotView } from './robot';
 import { anchorOf, frames, glowTex, hashStr, Interp, lerpColor, tex } from './util';
 
+/**
+ * Crate upscale. The crate is THE pickup and it has to be unmissable, but its
+ * frame size is pinned by shared/artManifest.ts — so the extra size is bought
+ * here. Nearest-neighbor keeps the edges hard, and the camera already applies a
+ * non-integer zoom of its own, so a fractional sprite scale costs nothing.
+ *
+ * Two factors, because the manifest pins crate at 14×12 and crate_triad at
+ * 16×14: one shared factor would leave every plain crate 14% smaller than the
+ * ceremony one, and the plain crates are the ones the player actually hunts for
+ * on floors 3 and 4. These land both at ~24×21 on the 480×270 feed.
+ */
+const CRATE_SCALE = 1.5; // crate_triad, 16×14
+const CRATE_SCALE_PLAIN = 1.75; // crate, 14×12
+/** Loose chips are tiny (7px) and are now a floor's only reward — upscale hard. */
+const CHIP_SCALE = 1.9;
+
 /** Contact-shadow footprint per grounded entity: [w, h, yOffset]. */
 const SHADOW: Partial<Record<Entity['kind'], readonly [number, number, number]>> = {
   fusedPrinter: [20, 7, 8],
   printerInnocent: [15, 6, 6],
-  crate: [18, 6, 8],
+  crate: [30, 10, 12], // scaled up with the body — a big crate needs a big footprint
+  debris: [42, 11, 5],
   fuse: [7, 3, 4],
+  chip: [9, 4, 4],
 };
 
 const KIND_ART: Record<Entity['kind'], ArtName> = {
   scrap: 'scrap',
+  chip: 'chip_item',
+  debris: 'debris_pile',
   crate: 'crate',
   cable: 'cable',
   fusedPrinter: 'fused_printer',
@@ -37,6 +57,8 @@ interface EntView {
   root: Container;
   body: Sprite;
   extra: Sprite | null; // pedestal / glow / socket halo
+  halo: Sprite | null; // crates: additive self-copy behind the body = rim glow
+  baseY: number; // body's resting y (crates bob around it)
   pool: Sprite | null; // radial light pool (pedestal teal / warm beacon / cable arc light)
   poolFlash: number; // cable: brief pool surge on each spark burst
   kind: Entity['kind'];
@@ -52,6 +74,7 @@ interface EntView {
   spitMs: number; // fusedPrinter: spit-frame linger after paper_thrown
   flashMs: number;
   sparkT: number; // cable spark countdown
+  seenBurst: boolean; // debris: one-shot wake explosion already played
   seen: boolean;
 }
 
@@ -71,9 +94,8 @@ export class WorldView {
   private t = 0;
   // shared light-pool / contact-shadow textures (created once, pooled per view)
   private shadowTex: Texture;
-  private poolTealTex: Texture;
   private poolSparkTex: Texture;
-  private poolWarmTex: Texture; // triad crate / EARS crate / fuse / elevator B
+  private poolWarmTex: Texture; // every crate / chip / fuse / elevator B
   private robotShadow: Sprite;
   // ambient dust motes: 1px, drift through light pools ONLY, pooled, max 8 alive
   private moteLayer = new Container();
@@ -89,7 +111,6 @@ export class WorldView {
     this.entLayer.sortableChildren = true;
     this.entLayer.addChild(this.robot.container);
     this.shadowTex = glowTex(32, 'rgba(0,0,0,0.85)');
-    this.poolTealTex = glowTex(48, 'rgba(81,125,116,0.6)');
     this.poolSparkTex = glowTex(56, 'rgba(127,212,255,0.6)');
     this.poolWarmTex = glowTex(48, 'rgba(255,195,107,0.55)');
     this.robotShadow = new Sprite(this.shadowTex);
@@ -135,6 +156,11 @@ export class WorldView {
       }
       case 'scrap_pickup':
         this.fx.glint(rs.pos.x, rs.pos.y - 6);
+        break;
+      case 'chip_pickup':
+        // bigger than a scrap glint — this one changes who the robot IS
+        this.fx.glint(rs.pos.x, rs.pos.y - 6);
+        this.fx.spark(rs.pos.x, rs.pos.y - 4, 6);
         break;
       case 'paper_thrown': {
         const v = ev.id ? this.views.get(ev.id) : undefined;
@@ -211,7 +237,9 @@ export class WorldView {
     }
 
     this.robot.update(sim.robot, view.ui, sim.tick, view.alpha, dt);
-    // contact shadow keeps the robot on the floor through hops and bumps
+    // contact shadow keeps the robot on the floor through hops and bumps —
+    // but a robot buried in a heap casts nothing
+    this.robotShadow.visible = !sim.robot.dormant;
     this.robotShadow.position.set(this.robot.container.x, this.robot.container.y + 6);
     this.robotShadow.zIndex = this.robot.container.zIndex - 0.5;
     this.fx.update(dt);
@@ -291,6 +319,7 @@ export class WorldView {
     body.anchor.set(ax, ay);
     let extra: Sprite | null = null;
     let pool: Sprite | null = null;
+    let halo: Sprite | null = null;
 
     // contact shadow first — everything else stacks on top of it
     const shCfg = SHADOW[e.kind];
@@ -303,30 +332,41 @@ export class WorldView {
       root.addChild(sh);
     }
 
-    if (triad) {
-      // THE shiny crate: warm beacon pool, no pedestal — it glows on its own
+    if (e.kind === 'crate') {
+      // EVERY crate is the reason to cross a floor — starter, EARS, BRAIN and
+      // the ceremony triad alike — so they all get the rig that used to belong
+      // to the floor-5 island crate alone: a warm floor pool, an additive halo
+      // around their own outline, and an upscaled body. A teal "charger" pool
+      // and a native-size sprite is what made the most important object on
+      // screen read as background clutter. The plain crates run hotter than the
+      // triad on both pool and halo: the triad animates its own light over four
+      // frames, they have a single static frame to work with.
       pool = new Sprite(this.poolWarmTex);
       pool.anchor.set(0.5);
       pool.blendMode = 'add';
-      pool.scale.set(1.3, 0.6);
-      pool.y = 6;
+      pool.scale.set(triad ? 1.5 : 1.7, triad ? 0.7 : 0.78);
+      pool.y = triad ? 7 : 11;
       pool.alpha = 0.22;
       root.addChild(pool);
-    } else if (e.kind === 'crate') {
-      // charging pool grounds the pedestal in the dark; the EARS crate IS a
-      // shiny crate conceptually — same warm pool as crate_triad, others teal
-      pool = new Sprite(e.id === 'crate_EARS' ? this.poolWarmTex : this.poolTealTex);
-      pool.anchor.set(0.5);
-      pool.blendMode = 'add';
-      pool.scale.set(1.05, 0.5);
-      pool.y = 7;
-      pool.alpha = 0.09;
-      root.addChild(pool);
-      extra = new Sprite(tex(this.art, 'pedestal'));
-      extra.anchor.set(0.5, 0.5);
-      extra.y = 4;
-      body.y = -4;
-      root.addChild(extra);
+      if (!triad) {
+        // the charging plinth the non-ceremony crates stand on, scaled to match
+        extra = new Sprite(tex(this.art, 'pedestal'));
+        extra.anchor.set(0.5, 0.5);
+        extra.scale.set(CRATE_SCALE);
+        extra.y = 7;
+        root.addChild(extra);
+      }
+      const bs = triad ? CRATE_SCALE : CRATE_SCALE_PLAIN;
+      body.scale.set(bs);
+      body.y = triad ? 0 : -6; // sit the shell on top of the plinth
+      halo = new Sprite(body.texture);
+      halo.anchor.set(ax, ay);
+      halo.blendMode = 'add';
+      halo.tint = 0xffc36b;
+      halo.scale.set(bs * 1.28);
+      halo.y = body.y;
+      halo.alpha = 0.18;
+      root.addChild(halo);
     } else if (e.kind === 'cable') {
       // blue-white arc light, flickered in updateEntity with the spark frames
       pool = new Sprite(this.poolSparkTex);
@@ -345,6 +385,37 @@ export class WorldView {
       pool.y = 4;
       pool.alpha = 0.08;
       root.addChild(pool);
+    } else if (e.kind === 'chip') {
+      // A loose chip is now the ONLY reward on its floor, and it is a 7px
+      // object in a dark room — so it gets the crate's whole beacon rig rather
+      // than a polite little glow: a wide floor pool, an additive halo around
+      // its own outline, an upscaled body and a bob. If the player can walk a
+      // lap of the island and not notice it, the floor has no content.
+      pool = new Sprite(this.poolWarmTex);
+      pool.anchor.set(0.5);
+      pool.blendMode = 'add';
+      pool.scale.set(1.5, 0.75);
+      pool.y = 3;
+      pool.alpha = 0.3;
+      root.addChild(pool);
+      body.scale.set(CHIP_SCALE);
+      halo = new Sprite(body.texture);
+      halo.anchor.set(ax, ay);
+      halo.blendMode = 'add';
+      halo.tint = 0xffc36b;
+      halo.scale.set(CHIP_SCALE * 1.6);
+      halo.alpha = 0.3;
+      root.addChild(halo);
+    } else if (e.kind === 'debris') {
+      // The sleeping robot's status light bleeding up THROUGH the junk: a warm
+      // ember that says something in there is still powered. Added after the
+      // body below — it has to sit in front of the heap to read as leakage.
+      pool = new Sprite(this.poolWarmTex);
+      pool.anchor.set(0.5);
+      pool.blendMode = 'add';
+      pool.scale.set(0.7, 0.45);
+      pool.y = -6;
+      pool.alpha = 0;
     } else if (e.kind === 'fuseSocket') {
       // additive self-copy behind the body = outline halo; lit only while the
       // robot carries the fuse (updateEntity) — powered-off before
@@ -365,6 +436,7 @@ export class WorldView {
       root.addChild(extra);
     }
     root.addChild(body);
+    if (e.kind === 'debris' && pool) root.addChild(pool); // glow leaks out of the heap
     root.position.set(e.pos.x, e.pos.y);
 
     const isEnemy = e.kind === 'fusedPrinter';
@@ -372,6 +444,8 @@ export class WorldView {
       root,
       body,
       extra,
+      halo,
+      baseY: body.y,
       pool,
       poolFlash: 0,
       kind: e.kind,
@@ -387,6 +461,7 @@ export class WorldView {
       spitMs: 0,
       flashMs: 0,
       sparkT: 1 + (hashStr(e.id) % 20) / 10,
+      seenBurst: e.kind === 'debris' && e.state === 'burst',
       seen: true,
     };
   }
@@ -442,68 +517,182 @@ export class WorldView {
         }
         break;
       }
-      case 'crate': {
-        if (v.triad) {
-          // THE shiny crate — beacon pulse + breathing warm pool + star glints.
-          // Most eye-catching thing on the floor after the robot (elevator B
-          // stays dark on ceremony floors until this resolves).
-          const fs = frames(this.art, 'crate_triad');
-          const off = e.state === 'open' || e.dead === true;
-          if (off) {
-            // resolved: stop pulsing, dim, pool off
-            v.body.texture = fs[0]!;
-            if (v.flashMs <= 0) v.body.tint = 0x8a8f96;
-            if (v.pool) v.pool.visible = false;
-          } else {
-            const cyc = ((t + v.phase) * 0.8) % 1; // ~1.25s beacon period
-            v.body.texture = fs[Math.floor(cyc * fs.length) % fs.length]!;
-            const pulse = 0.5 + 0.5 * Math.sin(cyc * Math.PI * 2);
-            if (v.pool) {
-              v.pool.visible = true;
-              v.pool.alpha = 0.2 + 0.14 * pulse;
-              const s = 1 + 0.07 * pulse;
-              v.pool.scale.set(s * 1.3, s * 0.6);
-            }
-            // occasional star-glint floating off the seams
-            v.sparkT -= dt;
-            if (v.sparkT <= 0) {
-              v.sparkT = 1.5 + v.rng() * 1.3;
+      case 'chip': {
+        // Beacon pulse + breathing pool + rising glints. Reads as SHINY from
+        // across a dark room without ever leaving the palette.
+        const fs = frames(this.art, 'chip_item');
+        const cyc = ((t + v.phase) * 0.9) % 1;
+        v.body.texture = fs[Math.floor(cyc * fs.length) % fs.length]!;
+        const pulse = 0.5 + 0.5 * Math.sin(cyc * Math.PI * 2);
+        if (v.pool) {
+          v.pool.alpha = 0.26 + 0.22 * pulse;
+          const s = 1 + 0.14 * pulse;
+          v.pool.scale.set(s * 1.5, s * 0.75);
+        }
+        if (v.halo) {
+          // Halo breathes out of phase with the body's own frame cycle, so the
+          // thing never sits still for a frame — motion is what the eye catches
+          // on a scanline-heavy feed, more than brightness does.
+          v.halo.texture = v.body.texture;
+          v.halo.alpha = 0.22 + 0.3 * pulse;
+          v.halo.scale.set(CHIP_SCALE * (1.5 + 0.35 * pulse));
+        }
+        // Slow bob, so it reads as hovering loot rather than floor texture.
+        v.body.y = v.baseY - 1.5 - 1.5 * pulse;
+        if (v.halo) v.halo.y = v.body.y;
+        v.sparkT -= dt;
+        if (v.sparkT <= 0) {
+          v.sparkT = 0.55 + v.rng() * 0.7;
+          this.fx.spawn({
+            x: x + (v.rng() - 0.5) * 6,
+            y: y - 4 - v.rng() * 3,
+            tex: frames(this.art, 'fx_spark'),
+            fps: 10,
+            life: 0.45,
+            vy: -13,
+            fade: true,
+            loop: true,
+            blend: 'add',
+            scale: 0.6,
+            tint: 0xffc36b,
+          });
+        }
+        break;
+      }
+      case 'debris': {
+        // Frames: settled / stir left / stir right / burst-open.
+        // Pre-wake the heap breathes and the ember pulses; on the wake frame it
+        // caves in and throws parts. `pileStir` (director) drives the shudder.
+        const fs = frames(this.art, 'debris_pile');
+        const burst = e.state === 'burst';
+        const hero = e.id === 'pile1'; // the only heap with a robot in it
+        if (burst) {
+          v.body.texture = fs[3]!;
+          if (!v.seenBurst) {
+            v.seenBurst = true;
+            this.fx.smoke(x, y - 10, 1.2);
+            for (let i = 0; i < 7; i++) {
+              const a = -Math.PI / 2 + (i / 6 - 0.5) * 2.1;
               this.fx.spawn({
-                x: x + (v.rng() - 0.5) * 10,
-                y: y - 8 - v.rng() * 4,
+                x,
+                y: y - 12,
                 tex: frames(this.art, 'fx_spark'),
-                fps: 10,
-                life: 0.45,
-                vy: -14,
+                fps: 12,
+                life: 0.5,
+                vx: Math.cos(a) * 70,
+                vy: Math.sin(a) * 60,
+                grav: 190,
                 fade: true,
-                loop: true,
                 blend: 'add',
                 scale: 0.7,
               });
+              this.fx.part(x, y - 12, tex(this.art, i % 2 ? 'part_plate' : 'part_antenna'), 0x6a6f76);
             }
           }
-          break;
+          if (v.pool) v.pool.alpha = Math.max(0, v.pool.alpha - dt * 0.9);
+        } else {
+          // stir: the director pulses ui.pileStir when the thing inside moves.
+          // ONLY the heap with something in it. `ui.pileStir` is one number for
+          // the whole feed, so applying it per-heap made every pile on the
+          // floor shudder in unison — which reads as an earthquake, and throws
+          // away the one thing the opening is built on: a single silhouette
+          // that is somehow alive among a room of dead ones.
+          const stir = hero ? view.ui.pileStir : 0;
+          v.body.texture =
+            stir > 0.05 ? fs[Math.floor(t * 14) % 2 === 0 ? 1 : 2]! : fs[0]!;
+          v.root.x = x + (stir > 0.05 ? (Math.sin(t * 46) * 1.4 * stir) : 0);
+          if (v.pool && hero) {
+            // slow ember breath, brighter for a moment on every stir
+            v.pool.alpha = 0.05 + 0.05 * (0.5 + 0.5 * Math.sin(t * 1.9)) + 0.22 * stir;
+          }
+          // a lone glint escaping the heap every few seconds — "something lives"
+          if (hero) {
+            v.sparkT -= dt;
+            if (v.sparkT <= 0) {
+              v.sparkT = 2.2 + v.rng() * 2.4;
+              this.fx.spawn({
+                x: x + (v.rng() - 0.5) * 8,
+                y: y - 10,
+                tex: frames(this.art, 'fx_spark'),
+                fps: 8,
+                life: 0.5,
+                vy: -9,
+                fade: true,
+                loop: true,
+                blend: 'add',
+                scale: 0.5,
+                tint: 0xffc36b,
+              });
+            }
+          }
         }
-        const fs = frames(this.art, 'crate');
-        const open = e.state === 'open';
-        v.body.texture = fs[open ? 1 : 0]!;
+        break;
+      }
+      case 'crate': {
+        // One beacon treatment for every crate. crate_triad animates its own
+        // light across 4 frames; the plain crate has only closed/open, so its
+        // pulse has to live entirely in the halo, the pool and the bob.
+        const fs = frames(this.art, v.art);
         const ped = frames(this.art, 'pedestal');
-        if (e.dead && !open) {
-          // unchosen sibling: stays shut, powered down
-          v.body.tint = 0x8a8f96;
+        const bs = v.triad ? CRATE_SCALE : CRATE_SCALE_PLAIN;
+        const open = e.state === 'open';
+        // Spent means opened, or a sibling that was never chosen — either way
+        // it stops advertising itself. A crate that keeps glowing after it has
+        // been looted sends the player back to it all game.
+        const spent = open || e.dead === true;
+        if (spent) {
+          v.body.texture = fs[!v.triad && open ? 1 : 0]!;
+          v.body.y = v.baseY;
+          if (v.flashMs <= 0) v.body.tint = 0x8a8f96;
+          if (v.halo) v.halo.visible = false;
+          if (v.pool) v.pool.visible = false;
           if (v.extra) {
             v.extra.texture = ped[0]!;
             v.extra.tint = 0x8a8f96;
           }
-        } else if (v.extra) {
-          v.extra.texture = ped[Math.floor((t + v.phase) * 1.6) % ped.length]!;
+          break;
+        }
+        const cyc = ((t + v.phase) * 0.8) % 1; // ~1.25s beacon period
+        const pulse = 0.5 + 0.5 * Math.sin(cyc * Math.PI * 2);
+        v.body.texture = v.triad ? fs[Math.floor(cyc * fs.length) % fs.length]! : fs[0]!;
+        // 1px bob, quantised — a pickup that floats pulls the eye, and rounding
+        // to whole pixels keeps it on the grid instead of shimmering between rows
+        v.body.y = v.baseY + Math.round(Math.sin((t + v.phase) * 2.1) * 1.2);
+        if (v.halo) {
+          // rim of warm light breathing around the crate's own silhouette —
+          // an outline the dark floor cannot swallow. The ceremony crate makes
+          // its own light across 4 frames and needs less help; the plain crate
+          // is a static frame, so its whole pulse has to come from here.
+          v.halo.visible = true;
+          v.halo.texture = v.body.texture;
+          v.halo.y = v.body.y;
+          v.halo.alpha = v.triad ? 0.14 + 0.18 * pulse : 0.22 + 0.18 * pulse;
+          v.halo.scale.set(bs * (1.24 + 0.1 * pulse));
         }
         if (v.pool) {
-          if (e.dead && e.state !== 'open') v.pool.visible = false; // unchosen sibling powers down
-          else if (e.id === 'crate_EARS')
-            // warm shiny-crate pool, slower breathe than the teal chargers
-            v.pool.alpha = 0.11 + 0.08 * (0.5 + 0.5 * Math.sin((t + v.phase) * 3));
-          else v.pool.alpha = 0.06 + 0.05 * (0.5 + 0.5 * Math.sin((t + v.phase) * 5));
+          v.pool.visible = true;
+          v.pool.alpha = v.triad ? 0.2 + 0.15 * pulse : 0.34 + 0.2 * pulse;
+          const s = 1 + 0.08 * pulse;
+          v.pool.scale.set(s * (v.triad ? 1.5 : 1.7), s * (v.triad ? 0.7 : 0.78));
+        }
+        if (v.extra) v.extra.texture = ped[Math.floor((t + v.phase) * 1.6) % ped.length]!;
+        // star-glints drifting off the seams — the SHINY the player asked for
+        v.sparkT -= dt;
+        if (v.sparkT <= 0) {
+          v.sparkT = 1.2 + v.rng() * 1.1;
+          this.fx.spawn({
+            x: x + (v.rng() - 0.5) * 14,
+            y: y - 10 - v.rng() * 5,
+            tex: frames(this.art, 'fx_spark'),
+            fps: 10,
+            life: 0.45,
+            vy: -14,
+            fade: true,
+            loop: true,
+            blend: 'add',
+            scale: 0.7,
+            tint: 0xffc36b,
+          });
         }
         break;
       }

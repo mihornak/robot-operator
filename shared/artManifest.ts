@@ -37,6 +37,13 @@ export const ART = {
 
   // --- props / pickups ---
   scrap: { frames: 2, w: 8, h: 6 }, // glint frame
+  /** The opening heap of dead machines the robot sleeps inside. Frames:
+   *  0 settled, 1/2 stir (it shifts while something moves under it),
+   *  3 burst open (after the wake — a hole where the robot came out). */
+  debris_pile: { frames: 4, w: 44, h: 30, anchor: [0.5, 0.78] },
+  /** A loose personality chip on the floor. 4-frame glint pulse — small, but
+   *  it must say PICK ME UP from across the room. */
+  chip_item: { frames: 4, w: 10, h: 8 },
   crate: { frames: 2, w: 14, h: 12 }, // closed / open
   /** THE shiny triad pickup — one per ceremony floor. 4-frame beacon pulse:
    *  latched case, warm inner light leaking through the seams. Must read as
@@ -69,6 +76,9 @@ export const ART = {
   glyph_MEMORY: { frames: 1, w: 8, h: 8 },
   glyph_ZAP: { frames: 1, w: 8, h: 8 },
   glyph_TOUGH: { frames: 1, w: 8, h: 8 },
+  /** Crate upgrades — same strip, same 8×8 grid as the chips. */
+  glyph_EARS: { frames: 1, w: 8, h: 8 },
+  glyph_BRAIN: { frames: 1, w: 8, h: 8 },
 } as const satisfies Record<string, ArtEntry>;
 
 export type ArtName = keyof typeof ART;

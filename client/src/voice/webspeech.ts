@@ -26,7 +26,9 @@ interface RecAlternativeLike {
 }
 interface RecResultLike {
   isFinal: boolean;
+  length: number;
   0: RecAlternativeLike;
+  [i: number]: RecAlternativeLike;
 }
 interface RecEventLike {
   resultIndex: number;
@@ -59,11 +61,31 @@ function detectCtor(): RecognitionCtor | null {
   );
 }
 
-/** A final transcript chunk + when it arrived (performance.now()). */
+/** A final transcript chunk + when it arrived (performance.now()).
+ *  `alts` holds the runner-up hypotheses for the same audio, best-first. */
 interface Chunk {
   text: string;
+  alts: string[];
   t: number;
 }
+
+/** How the mic is doing, for the director's troubleshooting card. */
+export type MicPermission = 'unknown' | 'granted' | 'denied';
+
+export interface MicDiagnosis {
+  /** Peak RMS observed during the last press (0 = literally no audio reached us). */
+  peakRms: number;
+  permission: MicPermission;
+  /** Last recognition error string ('' if none). */
+  lastError: string;
+  /** A recognition session is currently live. */
+  hot: boolean;
+  /** Recognition has produced real words at least once this session. */
+  everHeardWords: boolean;
+}
+
+/** Below this peak RMS across a whole press, no usable audio arrived at all. */
+export const SILENT_RMS = 0.008;
 
 export class WebSpeechSource implements CommandSource {
   private ctor = detectCtor();
@@ -81,6 +103,12 @@ export class WebSpeechSource implements CommandSource {
   // current press window
   private pressAt = -1;
   private peakRms = 0;
+  /** Live RMS, 0..1-ish, sampled by the meter — drives the on-screen VU. */
+  level = 0;
+  private permissionState: MicPermission = 'unknown';
+  private everHeardWords = false;
+  /** Runner-up hypotheses collected by the last stop(), best-first. */
+  private lastAlternatives: string[] = [];
 
   // loudness meter (analysis only — recognition uses its own capture)
   private ac: AudioContext | null = null;
@@ -97,6 +125,22 @@ export class WebSpeechSource implements CommandSource {
     return this._available;
   }
 
+  /** Runner-up STT hypotheses for the utterance stop() just returned. */
+  get alternatives(): string[] {
+    return this.lastAlternatives;
+  }
+
+  /** Everything the director needs to tell the player what is actually wrong. */
+  diagnose(): MicDiagnosis {
+    return {
+      peakRms: this.peakRms,
+      permission: this.ctor === null ? 'denied' : this.permissionState,
+      lastError: this.lastError,
+      hot: this.hot !== null,
+      everHeardWords: this.everHeardWords,
+    };
+  }
+
   /**
    * Pre-warm mic permission + stream AND the hot recognition session during
    * boot (user-gesture context) so neither eats the player's first press.
@@ -107,11 +151,14 @@ export class WebSpeechSource implements CommandSource {
       if (!this.stream || this.stream.getAudioTracks().every((t) => t.readyState === 'ended')) {
         this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       }
+      this.permissionState = 'granted';
     } catch {
+      this.permissionState = 'denied';
       this._available = false; // mic denied — director falls back to teletype
       return;
     }
     this.ensureHot();
+    void this.ensureMeter(); // live input level from boot, before any press
   }
 
   onUtterance(cb: (u: Utterance) => void): void {
@@ -125,11 +172,10 @@ export class WebSpeechSource implements CommandSource {
     this.liveTranscript = '';
     this.lastError = '';
     this.ensureHot();
-    void this.startMeter();
+    void this.ensureMeter();
   }
 
   async stop(): Promise<Utterance | null> {
-    this.stopMeter();
     if (this.pressAt < 0) return null;
     const pressAt = this.pressAt;
     this.pressAt = -1;
@@ -154,14 +200,30 @@ export class WebSpeechSource implements CommandSource {
       });
     }
 
-    const finals = this.finalChunks.filter((c) => inWindow(c.t)).map((c) => c.text);
-    let text = finals.join(' ').trim();
+    const windowed = this.finalChunks.filter((c) => inWindow(c.t));
+    let text = windowed.map((c) => c.text).join(' ').trim();
+    // Runner-up readings of the same audio. With one chunk we can offer the
+    // engine's own alternatives; with several, joining them per rank is the
+    // honest approximation. The server treats these as hints, not truth.
+    let alts: string[] = [];
+    if (windowed.length === 1) {
+      alts = windowed[0]!.alts.slice();
+    } else if (windowed.length > 1) {
+      const depth = Math.max(...windowed.map((c) => c.alts.length));
+      for (let i = 0; i < depth; i++) {
+        const joined = windowed.map((c) => c.alts[i] ?? c.text).join(' ').trim();
+        if (joined) alts.push(joined);
+      }
+    }
     if (!text && this.interim.trim() && inWindow(this.interimAt)) {
       text = this.interim.trim();
+      alts = [];
     }
+    this.lastAlternatives = alts.filter((a) => a && a !== text).slice(0, 3);
     // Chunks consumed by this press never leak into the next one.
     this.finalChunks = this.finalChunks.filter((c) => c.t > releaseAt);
     if (!text) return null;
+    this.everHeardWords = true;
     return { text, shouted: this.peakRms >= SHOUT_RMS, source: 'speech' };
   }
 
@@ -173,7 +235,10 @@ export class WebSpeechSource implements CommandSource {
     rec.lang = 'en-US';
     rec.interimResults = true;
     rec.continuous = true;
-    rec.maxAlternatives = 1;
+    // Ask for runner-ups. Browser STT mishears small function words constantly
+    // ("go TO steps right" for "go TWO steps right") and the alternatives list
+    // usually contains the reading the player meant — the LLM picks.
+    rec.maxAlternatives = 3;
     // NOTE: deliberately NOT setting Chrome 139+'s processLocally — with the
     // property present but the on-device model not installed, recognition
     // fails silently every session. Cloud recognition works everywhere.
@@ -189,7 +254,12 @@ export class WebSpeechSource implements CommandSource {
         if (r.isFinal) {
           finals++;
           if (finals > this.seenFinals) {
-            this.finalChunks.push({ text: alt.transcript.trim(), t: now });
+            const alts: string[] = [];
+            for (let k = 1; k < (r.length ?? 1); k++) {
+              const a = r[k]?.transcript?.trim();
+              if (a) alts.push(a);
+            }
+            this.finalChunks.push({ text: alt.transcript.trim(), alts, t: now });
             this.seenFinals = finals;
           }
         } else {
@@ -210,6 +280,7 @@ export class WebSpeechSource implements CommandSource {
     rec.onerror = (ev) => {
       if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') {
         this._available = false;
+        this.permissionState = 'denied';
       }
       this.lastError = ev.error;
       if (import.meta.env.DEV && ev.error !== 'no-speech') {
@@ -238,7 +309,16 @@ export class WebSpeechSource implements CommandSource {
 
   // -------------------------------------------------------------- loudness
 
-  private async startMeter(): Promise<void> {
+  /**
+   * The loudness meter runs CONTINUOUSLY from warmup on, not just while the key
+   * is held. The hot recognition session already holds the mic open, so this is
+   * free — and it buys two things worth much more than the shout flag: a real
+   * VU meter instead of a faked one, and a live signal readout on the mic
+   * troubleshooting card that goes green the instant the player fixes their
+   * input device. Diagnosing a dead mic requires seeing it come alive.
+   */
+  private async ensureMeter(): Promise<void> {
+    if (this.meterTimer !== null) return;
     const token = ++this.meterToken;
     try {
       if (!navigator.mediaDevices?.getUserMedia) return;
@@ -246,10 +326,12 @@ export class WebSpeechSource implements CommandSource {
       if (!this.stream || tracks.every((t) => t.readyState === 'ended')) {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         this.stream = stream; // cache even when superseded — next press reuses it
+        this.permissionState = 'granted';
         if (token !== this.meterToken) return;
       }
       if (!this.ac) this.ac = new AudioContext();
       if (this.ac.state !== 'running') void this.ac.resume().catch(() => {});
+      this.srcNode?.disconnect();
       this.srcNode = this.ac.createMediaStreamSource(this.stream);
       const analyser = this.ac.createAnalyser();
       analyser.fftSize = 1024;
@@ -261,14 +343,18 @@ export class WebSpeechSource implements CommandSource {
         let sum = 0;
         for (let i = 0; i < data.length; i++) sum += data[i]! * data[i]!;
         const rms = Math.sqrt(sum / data.length);
-        if (rms > this.peakRms) this.peakRms = rms;
+        // display level is compressed: speech RMS lives around 0.05–0.3
+        this.level = Math.min(1, rms * 4);
+        if (this.pressAt >= 0 && rms > this.peakRms) this.peakRms = rms;
       }, METER_INTERVAL_MS);
     } catch {
+      this.permissionState = 'denied';
       /* meter is best-effort — shouted stays false */
     }
   }
 
-  private stopMeter(): void {
+  /** Release the analyser (nothing else calls this today; kept for teardown). */
+  stopMeter(): void {
     this.meterToken++;
     if (this.meterTimer !== null) {
       window.clearInterval(this.meterTimer);
@@ -276,6 +362,7 @@ export class WebSpeechSource implements CommandSource {
     }
     this.srcNode?.disconnect();
     this.srcNode = null;
+    this.level = 0;
     // stream tracks intentionally NOT stopped — kept cached for the next press
   }
 }

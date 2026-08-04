@@ -105,6 +105,9 @@ export class RobotView {
   private glanceCd = 2.2;
   private glanceT = 0;
   private glanceOff = 0;
+  // wake: -1 idle, else seconds since the robot burst out of the pile
+  private wakeT = -1;
+  private wasDormant = false;
 
   constructor(private art: ArtAtlas, private fx: FxSystem) {
     this.wheelTex = frames(art, 'robot_wheels');
@@ -157,6 +160,38 @@ export class RobotView {
     // restart detection: back from the dead → reset the powerdown look
     if (rs.alive && !this.wasAlive) this.resetLook();
     this.wasAlive = rs.alive;
+
+    // ---- dormant: buried in the pile, nothing of it drawn but a status LED --
+    if (rs.dormant) {
+      this.wasDormant = true;
+      this.wakeT = -1;
+      this.container.visible = false;
+      return;
+    }
+    if (this.wasDormant) {
+      // THE moment: it comes out of the heap. A hard vertical launch that
+      // settles over ~0.9s, head snapped to camera by the director's ack.
+      this.wasDormant = false;
+      this.wakeT = 0;
+      this.headF = HEAD_S;
+      this.container.visible = true;
+      this.burstOut(ix, iy);
+    }
+    this.container.visible = true;
+    let wakeLift = 0;
+    let wakeSpin = 0;
+    if (this.wakeT >= 0) {
+      this.wakeT += dt;
+      const k = this.wakeT / 0.9;
+      if (k >= 1) {
+        this.wakeT = -1;
+      } else {
+        // one big pop up out of the junk, then a small settle bounce
+        wakeLift = -Math.sin(Math.min(1, k / 0.55) * Math.PI) * 13;
+        if (k > 0.55) wakeLift += -Math.sin(((k - 0.55) / 0.45) * Math.PI) * 2.5;
+        wakeSpin = Math.sin(k * Math.PI * 3) * 0.9; // shakes the dust off
+      }
+    }
 
     const speed = Math.hypot(rs.vel.x, rs.vel.y);
     const moving = speed > 0.01 && rs.alive;
@@ -376,8 +411,35 @@ export class RobotView {
         : Math.sin(this.t * 4 - 1.25) * 0.6);
     }
 
-    this.container.position.set(ix + this.recoilX, iy + this.recoilY + hopY + slump);
+    this.container.position.set(
+      ix + this.recoilX + wakeSpin,
+      iy + this.recoilY + hopY + slump + wakeLift,
+    );
     this.container.zIndex = iy + 7;
+  }
+
+  /** Debris kicked outward as the robot launches out of the pile. */
+  private burstOut(x: number, y: number): void {
+    const spark = frames(this.art, 'fx_spark');
+    for (let i = 0; i < 12; i++) {
+      const a = -Math.PI / 2 + (this.rng() - 0.5) * 2.4;
+      this.fx.spawn({
+        x: x + (this.rng() - 0.5) * 10,
+        y: y - 6,
+        tex: spark,
+        fps: 14,
+        life: 0.45 + this.rng() * 0.25,
+        vx: Math.cos(a) * (50 + this.rng() * 70),
+        vy: Math.sin(a) * (60 + this.rng() * 60),
+        grav: 220,
+        fade: true,
+        blend: 'add',
+        scale: 0.7,
+      });
+    }
+    this.fx.dust(x - 8, y + 4);
+    this.fx.dust(x + 8, y + 4);
+    this.fx.smoke(x, y - 6, 1.1);
   }
 
   /** Even ring of sparks bursting outward (chip-install ceremony). */
@@ -401,6 +463,7 @@ export class RobotView {
   }
 
   private resetLook(): void {
+    this.wakeT = -1;
     this.deathT = -1;
     this.smokeT = 0;
     this.puffStage = 0;

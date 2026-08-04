@@ -37,3 +37,11 @@ Read `GAME_SPEC.md` (systems) and `FIRST_MINUTES.md` (feel; wins on feel).
 - `pnpm dev` — server :8790 + vite :5173 (proxy `/api` → 8790)
 - `pnpm build` then `pnpm start` — production, server serves static
 - `pnpm check` — tsc across packages
+- `pnpm selftest` — sim determinism + floor sanity + behaviour contracts
+- `pnpm fuzz [seed] [samples]` — randomised navigation sweep: every floor, random
+  start tiles, every targetable entity, goto/pickup × initiative on/off. Scripted
+  tests only cover routes their author imagined; this is what catches "the robot
+  won't fetch things".
+- `pnpm test` — check + selftest + fuzz. Run before calling anything done.
+- `tools/level-designer.html` — draw floors in a browser, paste the exported
+  `FloorDef` into `client/src/sim/floors.ts`.

@@ -4,14 +4,40 @@
  * (it's paper taped over the monitor, not part of the feed).
  */
 
-import { Container, Graphics, Sprite, Text, type Texture, TilingSprite } from 'pixi.js';
-import type { ArtAtlas, ChipId, DeathCard, UiState } from '@shared/types';
-import { VIEW_H, VIEW_W } from '@shared/types';
-import { AMBER, AMBER_DIM, canvasTex, CAVEAT, clamp01, easeOutCubic, frames, lerp, tex, VT323 } from './util';
+import { Container, Graphics, Sprite, Text, Texture, TilingSprite } from 'pixi.js';
+import type { ArtAtlas, ChipId, DeathCard, MicHelp, UiState, UpgradeReveal } from '@shared/types';
+import { UPGRADE_LAND_MS, VIEW_H, VIEW_W } from '@shared/types';
+import { makeRng } from '@shared/rng';
+import {
+  AMBER,
+  AMBER_DIM,
+  canvasTex,
+  CAVEAT,
+  clamp01,
+  easeOutCubic,
+  frames,
+  glowTex,
+  lerp,
+  tex,
+  VT323,
+} from './util';
 
 type CeremonyOption = { id: ChipId; name: string; blurb: string };
 
 const NOTE_TEXT = "IF BROKEN: turn the main computer OFF and ON. It's on floor 15. — M.";
+
+// ------------------------------------------------------------ upgrade reveal
+/** Icon centre and the OSD strip slot it flies home to. */
+const UP_CX = VIEW_W / 2;
+const UP_CY = 104;
+const UP_HOME_X = VIEW_W - 10; // rightmost slot of Osd.glyphRow
+const UP_HOME_Y = 32;
+/** 8px glyph blown up to 88px on the feed. */
+const UP_SCALE = 11;
+const UP_LAND = UPGRADE_LAND_MS / 1000;
+const UP_FLY = 0.55; // fly duration, ending exactly on LAND
+const UP_FLY_AT = UP_LAND - UP_FLY;
+const UP_PARTICLES = 34;
 
 function vt(size: number, color: number = AMBER): Text {
   return new Text({ text: '', style: { fontFamily: VT323, fontSize: size, fill: color } });
@@ -35,6 +61,39 @@ export class Overlays {
   private ceremonyT = 0;
   private ceremonyCols: Container[] = [];
   private ceremonySay: Text | null = null;
+
+  private micCard = new Container();
+  private micData: MicHelp | null = null;
+  private micT = 0;
+  private micBar: Graphics | null = null;
+  private micBarLast = -1;
+  private micMeterY = 0;
+  private micMeterW = 0;
+
+  private upgrade = new Container();
+  private upgradeData: UpgradeReveal | null = null;
+  private upT = 0;
+  private upScrim: Graphics | null = null;
+  private upFlash: Graphics | null = null;
+  private upRays: Container | null = null;
+  private upRings: Sprite[] = [];
+  private upIconWrap = new Container();
+  private upIcon: Sprite | null = null;
+  private upIconGlow: Sprite | null = null;
+  private upHead: Text | null = null;
+  private upName: Text | null = null;
+  private upBlurb: Text | null = null;
+  private upParts: Array<{
+    s: Sprite;
+    base: number;
+    vx: number;
+    vy: number;
+    age: number;
+    life: number;
+  }> = [];
+  private upRingTex: Texture;
+  private upGlowTex: Texture;
+  private upRng = makeRng(0x51ee);
 
   private card = new Container();
   private cardData: DeathCard | null = null;
@@ -72,14 +131,30 @@ export class Overlays {
       ctx.fillRect(0, 1, 1, 1);
     });
 
+    // Expanding shockwave ring — one texture, scaled per frame. Rebuilding a
+    // Graphics circle every frame for a 3-ring burst is not free and this is.
+    this.upRingTex = canvasTex(64, 64, (ctx) => {
+      ctx.strokeStyle = '#ffb000';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(32, 32, 28, 0, Math.PI * 2);
+      ctx.stroke();
+    });
+    this.upRingTex.source.scaleMode = 'linear';
+    this.upGlowTex = glowTex(96, 'rgba(255,190,90,0.55)');
+
     this.noteText = this.buildNote();
     this.ceremony.visible = false;
     this.card.visible = false;
+    this.micCard.visible = false;
+    this.upgrade.visible = false;
     this.titleSub = vt(13, AMBER_DIM);
     this.buildTitle();
     this.title.visible = false;
 
-    this.container.addChild(this.blackout, this.press, this.hint, this.ceremony, this.card, this.title);
+    // The install reveal owns the whole feed while it runs, so it sits above
+    // the ceremony/mic cards and below only the death card and title.
+    this.container.addChild(this.blackout, this.press, this.hint, this.ceremony, this.micCard, this.upgrade, this.card, this.title);
   }
 
   /** Note is physical paper: crisp above the chunky feed. Set on resize. */
@@ -200,6 +275,280 @@ export class Overlays {
     this.ceremony.addChild(this.ceremonySay);
 
     this.ceremony.x = (VIEW_W - W) / 2;
+  }
+
+  // ------------------------------------------------------ upgrade reveal
+
+  /**
+   * THE moment. A module went in, and for two seconds nothing else on the feed
+   * matters: the room dims, the icon lands huge in the middle of the camera
+   * with sparks off it, it says what it is — and then it flies up into the OSD
+   * module strip and becomes the little glyph that lives there from now on.
+   *
+   * That last move is the point of the whole thing. The player watches the
+   * thing they picked up turn into the thing in the corner, so the corner is
+   * never again just decoration.
+   */
+  private buildUpgrade(d: UpgradeReveal): void {
+    this.upgrade.removeChildren().forEach((c) => c.destroy({ children: true }));
+    this.upRings.length = 0;
+    this.upParts.length = 0;
+    this.upIconWrap = new Container();
+
+    this.upScrim = new Graphics().rect(0, 0, VIEW_W, VIEW_H).fill({ color: 0x03040a, alpha: 1 });
+    this.upScrim.alpha = 0;
+    // Power surge: one additive wash over the feed on the install frame.
+    this.upFlash = new Graphics().rect(0, 0, VIEW_W, VIEW_H).fill({ color: 0xffd9a0, alpha: 1 });
+    this.upFlash.blendMode = 'add';
+    this.upgrade.addChild(this.upScrim, this.upFlash);
+
+    // Slow rotating shine behind the icon — a projector beam, not a sparkle.
+    const rays = new Container();
+    rays.position.set(UP_CX, UP_CY);
+    for (let i = 0; i < 10; i++) {
+      const ray = new Sprite(Texture.WHITE);
+      ray.tint = AMBER;
+      ray.anchor.set(0.5, 0);
+      ray.width = 3;
+      // Kept INSIDE the halo. Longer than the glow and they stop reading as
+      // light and start reading as scratches on the lens.
+      ray.height = 76;
+      ray.rotation = (i / 10) * Math.PI * 2;
+      ray.alpha = i % 2 === 0 ? 0.07 : 0.035;
+      ray.blendMode = 'add';
+      rays.addChild(ray);
+    }
+    this.upRays = rays;
+    this.upgrade.addChild(rays);
+
+    for (let i = 0; i < 3; i++) {
+      const ring = new Sprite(this.upRingTex);
+      ring.anchor.set(0.5);
+      ring.position.set(UP_CX, UP_CY);
+      ring.blendMode = 'add';
+      ring.visible = false;
+      this.upgrade.addChild(ring);
+      this.upRings.push(ring);
+    }
+
+    this.upIconGlow = new Sprite(this.upGlowTex);
+    this.upIconGlow.anchor.set(0.5);
+    this.upIconGlow.blendMode = 'add';
+    // Lives INSIDE the icon wrap so it flies home with it — which means its
+    // scale is multiplied by UP_SCALE. 0.2 × 96px × 11 ≈ a 210px halo; at 1.0
+    // it is a 1000px amber wash that eats the entire feed.
+    this.upIconGlow.scale.set(0.2);
+    this.upIcon = new Sprite(tex(this.art, `glyph_${d.id}`));
+    this.upIcon.anchor.set(0.5);
+    this.upIconWrap.addChild(this.upIconGlow, this.upIcon);
+    this.upIconWrap.position.set(UP_CX, UP_CY);
+    this.upgrade.addChild(this.upIconWrap);
+
+    // Sparks: half chunky art frames, half 1px embers, all thrown outward from
+    // under the icon on the same frame the flash goes off.
+    const sparkFrames = frames(this.art, 'fx_spark');
+    for (let i = 0; i < UP_PARTICLES; i++) {
+      const chunky = i % 3 === 0;
+      const s = chunky
+        ? new Sprite(sparkFrames[i % sparkFrames.length])
+        : new Sprite(Texture.WHITE);
+      s.anchor.set(0.5);
+      // Texture.WHITE is 1×1 — size embers with SCALE, never width/height, so
+      // the shrink-out below doesn't fight the sizing.
+      const base = chunky ? 1 : 2;
+      s.scale.set(base);
+      if (!chunky) s.tint = i % 2 === 0 ? AMBER : 0xffe6b0;
+      s.blendMode = 'add';
+      const ang = (i / UP_PARTICLES) * Math.PI * 2 + this.upRng() * 0.5;
+      // Born on the rim of the icon, not under it: sparks that spawn dead
+      // centre spend their brightest frames hidden behind 88px of glyph.
+      const r0 = 34 + this.upRng() * 14;
+      s.position.set(UP_CX + Math.cos(ang) * r0, UP_CY + Math.sin(ang) * r0);
+      const spd = 130 + this.upRng() * 220;
+      this.upgrade.addChild(s);
+      this.upParts.push({
+        s,
+        base,
+        vx: Math.cos(ang) * spd,
+        vy: Math.sin(ang) * spd,
+        age: 0,
+        life: 0.7 + this.upRng() * 0.7,
+      });
+    }
+
+    this.upHead = vt(11, AMBER_DIM);
+    this.upHead.anchor.set(0.5);
+    this.upHead.style.letterSpacing = 4;
+    this.upHead.text = 'MODULE INSTALLED';
+    this.upHead.position.set(UP_CX, 44);
+
+    this.upName = vt(30);
+    this.upName.anchor.set(0.5);
+    this.upName.style.letterSpacing = 5;
+    this.upName.text = d.name.toUpperCase();
+    this.upName.position.set(UP_CX, 162);
+
+    this.upBlurb = new Text({
+      text: d.blurb,
+      style: {
+        fontFamily: VT323,
+        fontSize: 13,
+        fill: AMBER_DIM,
+        align: 'center',
+        wordWrap: true,
+        wordWrapWidth: 300,
+      },
+    });
+    this.upBlurb.anchor.set(0.5, 0);
+    this.upBlurb.position.set(UP_CX, 182);
+
+    this.upgrade.addChild(this.upHead, this.upName, this.upBlurb);
+  }
+
+  /** Per-frame choreography for the reveal. `this.upT` is seconds since install. */
+  private updateUpgrade(dt: number): void {
+    const t = this.upT;
+    // Flying home: everything but the icon is gone by the time it moves.
+    const fly = clamp01((t - UP_FLY_AT) / UP_FLY);
+    const flyE = easeOutCubic(fly);
+
+    if (this.upScrim) {
+      // In fast, out with the fly — the room comes back as the icon leaves.
+      this.upScrim.alpha = 0.82 * clamp01(t / 0.14) * (1 - flyE);
+    }
+    if (this.upFlash) {
+      const f = Math.max(0, 1 - t / 0.28);
+      this.upFlash.alpha = f * f * 0.55;
+      this.upFlash.visible = f > 0;
+    }
+    if (this.upRays) {
+      this.upRays.rotation += dt * 0.35;
+      this.upRays.alpha = clamp01((t - 0.1) / 0.3) * (1 - flyE);
+      this.upRays.scale.set(0.8 + 0.2 * clamp01(t / 0.6));
+    }
+
+    for (let i = 0; i < this.upRings.length; i++) {
+      const ring = this.upRings[i]!;
+      const rt = (t - 0.02 - i * 0.16) / 0.85;
+      ring.visible = rt > 0 && rt < 1;
+      if (!ring.visible) continue;
+      const e = easeOutCubic(rt);
+      ring.scale.set(0.25 + e * 3.4);
+      ring.alpha = (1 - rt) * 0.55;
+    }
+
+    for (const p of this.upParts) {
+      p.age += dt;
+      const k = p.age / p.life;
+      if (k >= 1) {
+        p.s.visible = false;
+        continue;
+      }
+      // drag + a little gravity: embers, not fireworks
+      p.vx -= p.vx * 2.6 * dt;
+      p.vy -= p.vy * 2.6 * dt;
+      p.vy += 55 * dt;
+      p.s.x += p.vx * dt;
+      p.s.y += p.vy * dt;
+      p.s.alpha = 1 - k * k;
+      p.s.scale.set(p.base * Math.max(0.25, 1 - k * 0.8));
+    }
+
+    if (this.upIcon && this.upIconGlow) {
+      // pop: overshoot in, then breathe until it leaves
+      const pop = clamp01((t - 0.06) / 0.3);
+      const b = pop - 1;
+      const back = 1 + b * b * (2.7 * b + 1.7); // easeOutBack
+      const breathe = 1 + 0.03 * Math.sin((t - 0.36) * 5);
+      const big = UP_SCALE * (0.25 + 0.75 * back) * (pop >= 1 ? breathe : 1);
+      const s = lerp(big, 1, flyE);
+      this.upIconWrap.scale.set(s);
+      this.upIconWrap.position.set(
+        lerp(UP_CX, UP_HOME_X, flyE),
+        lerp(UP_CY, UP_HOME_Y, flyE),
+      );
+      // hand-off: it vanishes the instant the OSD glyph pops in its place
+      this.upIconWrap.alpha = pop * (fly >= 1 ? 0 : 1);
+      this.upIconGlow.alpha = (0.55 + 0.25 * Math.sin(t * 7)) * (1 - flyE);
+      this.upIconGlow.rotation += dt * 0.6;
+    }
+
+    const textOut = 1 - clamp01((t - UP_FLY_AT) / 0.28);
+    if (this.upHead) this.upHead.alpha = clamp01((t - 0.14) / 0.25) * 0.9 * textOut;
+    if (this.upName) {
+      const np = clamp01((t - 0.26) / 0.22);
+      this.upName.alpha = np * textOut;
+      this.upName.scale.set(lerp(1.35, 1, easeOutCubic(np)));
+    }
+    if (this.upBlurb) this.upBlurb.alpha = clamp01((t - 0.5) / 0.3) * 0.9 * textOut;
+  }
+
+  // -------------------------------------------------------- mic help card
+
+  /**
+   * Mic troubleshooting, styled as a maintenance readout on the same feed —
+   * never a browser dialog, never breaking the fiction that this is a monitor.
+   * Numbered steps, a live input meter at the bottom so the player gets instant
+   * feedback the moment the mic starts working, and the teletype escape hatch.
+   */
+  private buildMicCard(help: MicHelp): void {
+    this.micCard.removeChildren().forEach((c) => c.destroy({ children: true }));
+    this.micBar = null;
+    const W = 300;
+    const H = 42 + help.steps.length * 13 + 26;
+
+    const bg = new Graphics()
+      .roundRect(0, 0, W, H, 4)
+      .fill({ color: 0x060708, alpha: 0.93 })
+      .stroke({ color: 0x3a2c08, width: 1 })
+      .roundRect(3, 3, W - 6, H - 6, 3)
+      .stroke({ color: AMBER, width: 1, alpha: 0.16 });
+    const scan = new TilingSprite({ texture: this.cardScanTex, width: W, height: H });
+    scan.alpha = 0.5;
+
+    const head = vt(13);
+    head.text = 'AUDIO INPUT FAULT';
+    head.position.set(12, 8);
+
+    const rule = new Graphics().rect(12, 25, W - 24, 1).fill({ color: AMBER, alpha: 0.18 });
+
+    const why = new Text({
+      text: help.title,
+      style: { fontFamily: VT323, fontSize: 11, fill: AMBER_DIM, wordWrap: true, wordWrapWidth: W - 24 },
+    });
+    why.position.set(12, 28);
+
+    this.micCard.addChild(bg, scan, head, rule, why);
+
+    help.steps.forEach((s, i) => {
+      const line = new Text({
+        text: `${i + 1}. ${s}`,
+        style: { fontFamily: VT323, fontSize: 11, fill: AMBER, wordWrap: true, wordWrapWidth: W - 30 },
+      });
+      line.position.set(16, 44 + i * 13);
+      this.micCard.addChild(line);
+    });
+
+    const meterY = H - 17;
+    this.micMeterY = meterY + 1;
+    this.micMeterW = W - 62;
+    const meterLabel = vt(10, AMBER_DIM);
+    meterLabel.text = 'INPUT';
+    meterLabel.position.set(12, meterY - 4);
+    const track = new Graphics()
+      .rect(48, meterY + 1, W - 60, 4)
+      .stroke({ color: AMBER, width: 1, alpha: 0.25 });
+    this.micBar = new Graphics();
+    this.micBarLast = -1;
+
+    const esc = vt(10, AMBER_DIM);
+    esc.anchor.set(1, 0);
+    esc.text = 'OR JUST TYPE — [ESC] TO CLOSE';
+    esc.position.set(W - 12, 8);
+    esc.alpha = 0.75;
+
+    this.micCard.addChild(meterLabel, track, this.micBar, esc);
+    this.micCard.x = (VIEW_W - W) / 2;
   }
 
   // ----------------------------------------------------------- death card
@@ -412,6 +761,63 @@ export class Overlays {
       if (this.ceremony.alpha <= 0) this.ceremony.visible = false;
     } else {
       this.ceremonyData = null;
+    }
+
+    // upgrade reveal — identity change restarts it, so the same module twice
+    // (a restart, a re-install) still plays the whole beat
+    if (ui.upgrade) {
+      if (ui.upgrade !== this.upgradeData) {
+        this.upgradeData = ui.upgrade;
+        this.buildUpgrade(ui.upgrade);
+        this.upT = 0;
+        this.upgrade.visible = true;
+      }
+      this.upT += dt;
+      this.updateUpgrade(dt);
+    } else if (this.upgrade.visible) {
+      // Cleared — either the beat ended or the world broke under it (death,
+      // elevator). Either way it goes NOW: a reveal outliving its floor is worse
+      // than a reveal cut short.
+      this.upgrade.visible = false;
+      this.upgradeData = null;
+    } else {
+      this.upgradeData = null;
+    }
+
+    // mic help card — slides in under the OSD header, live input meter running
+    if (ui.micHelp) {
+      if (ui.micHelp !== this.micData) {
+        const fresh = this.micData === null;
+        this.micData = ui.micHelp;
+        this.buildMicCard(ui.micHelp);
+        if (fresh) this.micT = 0;
+        this.micCard.visible = true;
+      }
+      this.micT = Math.min(1, this.micT + dt / 0.35);
+      const e = easeOutCubic(this.micT);
+      this.micCard.alpha = e;
+      this.micCard.y = lerp(20, 32, e);
+      if (this.micBar) {
+        // repaint only on visible change — Graphics rebuilds are not free
+        const lvl = Math.round(clamp01(ui.micLevel) * 40) / 40;
+        if (lvl !== this.micBarLast) {
+          this.micBarLast = lvl;
+          const w = this.micMeterW * lvl;
+          this.micBar.clear();
+          if (w > 0) {
+            // green the moment ANY signal arrives — that is the whole diagnosis
+            this.micBar
+              .rect(49, this.micMeterY, w, 3)
+              .fill({ color: lvl > 0.04 ? 0x7dff9a : AMBER, alpha: 0.9 });
+          }
+        }
+      }
+    } else if (this.micCard.visible) {
+      this.micData = null;
+      this.micCard.alpha = Math.max(0, this.micCard.alpha - dt / 0.22);
+      if (this.micCard.alpha <= 0) this.micCard.visible = false;
+    } else {
+      this.micData = null;
     }
 
     // death card slide-in

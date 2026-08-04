@@ -5,14 +5,25 @@
  */
 
 import { Container, Sprite, Text, Texture } from 'pixi.js';
-import type { ArtAtlas, ChipId, UiState } from '@shared/types';
+import type { ArtAtlas, ModuleId, UiState } from '@shared/types';
 import { VIEW_W } from '@shared/types';
 import { makeRng } from '@shared/rng';
-import { AMBER, AMBER_DIM, tex, VT323 } from './util';
+import { AMBER, AMBER_DIM, clamp01, tex, VT323 } from './util';
 
 const VU_BARS = 5;
 const GLYPH_STEP = 12; // right-aligned strip pitch (8px glyph + 4px gap)
 const SUB_TEXT_Y = 212; // caption home row; shifts up one line over the teletype
+
+const HOT = 0xff4d3a; // the REC dot's alarm red — the only non-amber ink on the feed
+// Hull bar: one lit block per hit point, right-aligned under the clock.
+const HULL_SEG_W = 5;
+const HULL_SEG_H = 4;
+const HULL_PITCH = 7; // 5px block + 2px gap — discrete enough to count at 480 wide
+/** Tucked straight under the clock. It used to sit at y=46, below the module
+ *  strip and the mood row — which on a floor with no chips and no mood left it
+ *  hanging in open space with nothing above it, reading as scenery rather than
+ *  as part of the header. The right column now runs clock → hull → chips → mood. */
+const HULL_Y = 19;
 
 function osdText(size: number, color = AMBER): Text {
   return new Text({
@@ -38,7 +49,19 @@ export class Osd {
   private glyphFlash: (Sprite | null)[] = [];
   private glyphPop: number[] = [];
 
+  private hullRow = new Container();
+  private hullSegs = new Container();
+  private hullSockets: Sprite[] = [];
+  private hullFills: Sprite[] = [];
+  private hullFlash: Sprite;
+  private hullMax = -1;
+  private hullPrevHp = -1;
+  private hullLostIdx = -1;
+
   private mood: Text;
+  private objective: Text;
+  private orders: Text;
+  private planRow: Text;
   private mic: Text;
   private vuBars: Sprite[] = [];
   private vuLvl = [0, 0, 0, 0, 0];
@@ -78,7 +101,24 @@ export class Osd {
 
     this.mood = osdText(10, AMBER_DIM);
     this.mood.anchor.set(1, 0);
-    this.mood.position.set(VIEW_W - 6, 30);
+    this.mood.position.set(VIEW_W - 6, 44); // pushed below the hull bar + chip strip
+
+    // Second header row: what the robot is doing. '»' = the operator's order,
+    // '·' = the robot's own idea. Two characters of authorship, all the time.
+    this.objective = osdText(10, AMBER_DIM);
+    this.objective.position.set(6, 16);
+    this.objective.alpha = 0.8;
+
+    // Third row: the standing rules it is holding. This is the receipt for
+    // every "and avoid the machines" the player ever said.
+    this.orders = osdText(10, AMBER_DIM);
+    this.orders.position.set(6, 28);
+    this.orders.alpha = 0.62;
+
+    // Fourth row: what the robot still has queued after the current step.
+    this.planRow = osdText(10, AMBER_DIM);
+    this.planRow.position.set(6, 40);
+    this.planRow.alpha = 0.45;
 
     this.mic = osdText(10);
     this.mic.position.set(6, 242);
@@ -102,14 +142,33 @@ export class Osd {
       this.dots.push(dot);
     }
 
-    this.glyphRow.position.set(VIEW_W - 6, 20);
+    // Hull integrity, right-aligned directly under the clock: the robot-state
+    // column (condition → modules → mood) reads top-down, away from the
+    // mission column on the left. Blocks grow leftward from the same 6px margin.
+    this.hullRow.position.set(VIEW_W - 6, HULL_Y);
+    // One shared additive bloom, parked on whichever block just went dark —
+    // only ever one block dies at a time, and keeping it out of `hullSegs`
+    // means the maxHp rebuild can nuke the segments without taking it with them.
+    this.hullFlash = new Sprite(Texture.WHITE);
+    this.hullFlash.anchor.set(0.5);
+    this.hullFlash.tint = HOT;
+    this.hullFlash.blendMode = 'add';
+    this.hullFlash.y = HULL_SEG_H / 2;
+    this.hullFlash.visible = false;
+    this.hullRow.addChild(this.hullSegs, this.hullFlash);
+
+    this.glyphRow.position.set(VIEW_W - 6, 32); // under the hull bar
     this.container.addChild(
       this.main,
       this.recGlow,
       this.recDot,
       this.clock,
       this.glyphRow,
+      this.hullRow,
       this.mood,
+      this.objective,
+      this.orders,
+      this.planRow,
       this.mic,
       ...this.vuBars,
       ...this.dots,
@@ -142,6 +201,18 @@ export class Osd {
     this.tele = osdText(10);
     this.tele.position.set(6, 256);
     this.captionLayer.addChild(this.caption, this.capCursor, this.tele);
+  }
+
+  /** One hull block. Sized via width/height, never scale — the flash animates
+   *  the same way, and mixing the two on a Texture.WHITE sprite fights itself. */
+  private hullBlock(x: number): Sprite {
+    const s = new Sprite(Texture.WHITE);
+    s.anchor.set(0.5);
+    s.width = HULL_SEG_W;
+    s.height = HULL_SEG_H;
+    s.position.set(x, HULL_SEG_H / 2);
+    this.hullSegs.addChild(s);
+    return s;
   }
 
   update(ui: UiState, dt: number): void {
@@ -187,7 +258,7 @@ export class Osd {
       this.glyphSprites.length = 0;
       this.glyphFlash.length = 0;
       this.glyphPop.length = 0;
-      ui.glyphs.forEach((id: ChipId, i: number) => {
+      ui.glyphs.forEach((id: ModuleId, i: number) => {
         const k = ui.glyphs.length - 1 - i; // 0 = rightmost slot
         if (i > 0) {
           // faint separator dot centered in the gap
@@ -237,6 +308,73 @@ export class Osd {
     }
     this.mood.text = ui.moodGlyph;
 
+    // Objective + standing rules ride under the header, and vanish with it so
+    // the death card and title screens stay clean.
+    const showStatus = ui.osd.length > 0 && ui.phase !== 'cliffhanger';
+    this.objective.visible = showStatus && ui.objective.length > 0;
+    this.objective.text = ui.objective;
+    this.orders.visible = showStatus && ui.orders.length > 0;
+    this.orders.text = ui.orders.join(' · ');
+    // Queued plan steps, dimmest of the three rows — the operator briefed a
+    // sequence and this is the receipt that the robot is still holding it.
+    // Slots in under `orders`, or takes its row when there are no standing rules.
+    this.planRow.visible = showStatus && ui.plan.length > 0;
+    this.planRow.text = ui.plan.join(' → ');
+    this.planRow.y = ui.orders.length > 0 ? 40 : 28;
+    // Waiting to be briefed is a STATE, not an absence of one: blink the
+    // objective so a held robot never reads as a frozen game.
+    this.objective.alpha = ui.awaitingBriefing ? 0.45 + 0.35 * (blink ? 1 : 0) : 0.8;
+
+    // Hull integrity — segmented, because "three blocks left" is a number the
+    // player can act on and a shrinking bar is not. Rebuilt only when the TOUGH
+    // chip changes maxHp, never per frame.
+    const maxHp = Math.max(1, ui.maxHp);
+    if (maxHp !== this.hullMax) {
+      this.hullMax = maxHp;
+      this.hullSegs.removeChildren().forEach((c) => c.destroy());
+      this.hullSockets.length = 0;
+      this.hullFills.length = 0;
+      for (let i = 0; i < maxHp; i++) {
+        const x = -(maxHp - 1 - i) * HULL_PITCH - HULL_SEG_W / 2;
+        this.hullSockets.push(this.hullBlock(x)); // socket first = fill draws over it
+        this.hullFills.push(this.hullBlock(x));
+      }
+    }
+    if (ui.hp < this.hullPrevHp) this.hullLostIdx = ui.hp; // lowest block just put out
+    this.hullPrevHp = ui.hp;
+    this.hullRow.visible = showStatus;
+    if (showStatus) {
+      const dead = ui.hp <= 0;
+      const crit = !dead && ui.hp <= maxHp / 3;
+      // 9 rad/s — faster than the mic's 6, so urgency is legible from the rate
+      // alone. No text label: the colour and the tempo are the whole message.
+      const alarm = 0.5 + 0.5 * Math.sin(this.t * 9);
+      for (let i = 0; i < maxHp; i++) {
+        const fill = this.hullFills[i];
+        fill.visible = i < ui.hp;
+        fill.tint = crit ? HOT : AMBER;
+        fill.alpha = crit ? 0.5 + 0.5 * alarm : 0.95;
+        // Spent sockets stay drawn — an unlit LED segment, so the gap between
+        // "was" and "is" is the readout. At zero they flatline red together.
+        const socket = this.hullSockets[i];
+        socket.tint = dead ? HOT : AMBER_DIM;
+        socket.alpha = dead ? 0.1 + 0.22 * alarm : 0.2;
+      }
+      // Hit punch: additive bloom over the block that just died, born big and
+      // collapsing into the socket as hpFlash decays — the glyph install pop
+      // played backwards, install vs. loss.
+      const f = clamp01(ui.hpFlash);
+      const lost = this.hullLostIdx;
+      this.hullFlash.visible = f > 0.02 && lost >= 0 && lost < maxHp;
+      if (this.hullFlash.visible) {
+        const grow = 1 + 1.8 * f;
+        this.hullFlash.x = -(maxHp - 1 - lost) * HULL_PITCH - HULL_SEG_W / 2;
+        this.hullFlash.width = HULL_SEG_W * grow;
+        this.hullFlash.height = HULL_SEG_H * grow;
+        this.hullFlash.alpha = f;
+      }
+    }
+
     // mic state, bottom-left
     const listening = ui.micState === 'listening';
     const thinking = ui.micState === 'thinking';
@@ -251,12 +389,17 @@ export class Osd {
       dot.visible = thinking;
       if (thinking) dot.alpha = Math.floor(this.t * 4) % 3 === i ? 1 : 0.3;
     }
-    // fake VU — rng retargets ~14×/s, bars chase; real RMS unavailable here
+    // VU — driven by the REAL input level (ui.micLevel) with a little per-bar
+    // scatter for life. Flat bars while the player is clearly talking is the
+    // single clearest "your mic is not working" tell we can give them.
     if (listening) {
       this.vuT += dt;
       if (this.vuT > 0.07) {
         this.vuT = 0;
-        for (let i = 0; i < VU_BARS; i++) this.vuTarget[i] = 2 + this.rng() * 6;
+        const lvl = Math.max(0, Math.min(1, ui.micLevel));
+        for (let i = 0; i < VU_BARS; i++) {
+          this.vuTarget[i] = 0.5 + lvl * (5 + this.rng() * 3.5);
+        }
       }
       const chase = Math.min(1, dt * 16);
       const x0 = 6 + this.mic.width + 6;

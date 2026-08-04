@@ -1,10 +1,10 @@
 /** OSD module glyphs — 8×8 crisp 1px icons, amber on transparent. */
 
-import type { ChipId } from '@shared/types';
+import type { ModuleId } from '@shared/types';
 import { AMBER } from './palette';
 import type { Drawer, Px } from './px';
 
-const GLYPHS: Record<ChipId, readonly string[]> = {
+const GLYPHS: Record<ModuleId, readonly string[]> = {
   MAGNET: [
     '..XXXX..',
     '.XXXXXX.',
@@ -65,8 +65,31 @@ const GLYPHS: Record<ChipId, readonly string[]> = {
     '........',
     '........',
   ],
+  // Radiating waves out of a source blob — "it hears further" with no words.
+  EARS: [
+    '.......X',
+    '.....X.X',
+    '...X.X.X',
+    'XX.X.X.X',
+    'XX.X.X.X',
+    '...X.X.X',
+    '.....X.X',
+    '.......X',
+  ],
+  // A bulb, not a brain: at 8×8 an actual brain is grey mush, and the thing the
+  // BRAIN crate actually grants is IDEAS.
+  BRAIN: [
+    '..XXX...',
+    '.X...X..',
+    'X.....X.',
+    'X..X..X.',
+    '.X.X.X..',
+    '..XXX...',
+    '..X.X...',
+    '...X....',
+  ],
 };
 
-export function glyphDrawer(id: ChipId): Drawer {
+export function glyphDrawer(id: ModuleId): Drawer {
   return (p: Px, _frame: number) => p.bmp(0, 0, GLYPHS[id], { X: AMBER });
 }

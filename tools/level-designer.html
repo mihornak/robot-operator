@@ -1,0 +1,1740 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ROBOT OPERATOR — LEVEL DESIGNER</title>
+<style>
+  :root{
+    --amber:#ffb000;
+    --amber-dim:#a87400;
+    --amber-faint:#5c4106;
+    --bg:#0a0906;
+    --panel:#12100b;
+    --line:#3a2c10;
+    --red:#ff5f56;
+    --green:#6ee787;
+    --ink:#120e08;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--amber);
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"DejaVu Sans Mono",monospace;
+    font-size:12px; line-height:1.45;
+    -webkit-font-smoothing:none;
+  }
+  header{
+    display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+    padding:7px 12px; border-bottom:2px solid var(--line); background:var(--panel);
+  }
+  header h1{
+    font-size:13px; margin:0 14px 0 0; letter-spacing:2px; white-space:nowrap;
+    text-shadow:0 0 10px rgba(255,176,0,.35);
+  }
+  header h1 small{display:block; font-size:9px; letter-spacing:1px; color:var(--amber-dim); font-weight:400}
+  main{display:flex; align-items:stretch; height:calc(100% - 46px)}
+  #stage{flex:1; overflow:auto; padding:14px; background:
+    repeating-linear-gradient(0deg, rgba(255,176,0,.024) 0 1px, transparent 1px 3px), var(--bg);}
+  #stage canvas{display:block; border:1px solid var(--line); background:#000; cursor:crosshair;
+    image-rendering:pixelated; box-shadow:0 0 40px rgba(255,176,0,.06)}
+  #readout{margin-top:8px; color:var(--amber-dim); white-space:pre; font-size:11px}
+  aside{
+    width:394px; min-width:394px; overflow-y:auto; border-left:2px solid var(--line);
+    background:var(--panel); padding:10px 12px 40px;
+  }
+  h2{
+    font-size:11px; letter-spacing:1.6px; margin:16px 0 7px; padding-bottom:3px;
+    border-bottom:1px solid var(--line); color:var(--amber);
+  }
+  h2:first-child{margin-top:2px}
+  button,select,input,textarea{
+    font-family:inherit; font-size:11px; color:var(--amber);
+    background:#1a1510; border:1px solid #6b4d10; border-radius:0; padding:3px 7px;
+  }
+  button{cursor:pointer; text-transform:uppercase; letter-spacing:.7px; white-space:nowrap}
+  button:hover{background:#2b2210; border-color:var(--amber-dim)}
+  button.on{background:var(--amber); color:var(--ink); border-color:var(--amber); font-weight:700}
+  button.wide{width:100%; margin-top:6px; padding:5px}
+  select{padding:3px 4px}
+  input[type=text],input[type=number]{width:100%; padding:3px 5px}
+  textarea{width:100%; resize:vertical; background:#0d0b07; border-color:var(--line);
+    color:#ffc94d; font-size:10.5px; line-height:1.4; white-space:pre; overflow-x:auto}
+  label.f{display:block; margin:6px 0 0; color:var(--amber-dim); font-size:10px; letter-spacing:.6px}
+  .row{display:flex; gap:6px; flex-wrap:wrap; align-items:center}
+  .row.tight{gap:4px}
+  .sep{width:1px; align-self:stretch; background:var(--line); margin:0 4px}
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:4px}
+  .pal{display:grid; grid-template-columns:1fr 1fr; gap:4px}
+  .pal button{display:flex; align-items:center; gap:6px; text-transform:none; letter-spacing:0;
+    justify-content:flex-start; padding:3px 5px; overflow:hidden}
+  .sw{width:14px; height:14px; flex:0 0 14px; border:1px solid rgba(0,0,0,.6);
+    display:inline-flex; align-items:center; justify-content:center; color:#120e08;
+    font-size:9px; font-weight:700; line-height:1}
+  #problems{list-style:none; margin:0; padding:0}
+  #problems li{padding:2px 0 2px 14px; text-indent:-14px; word-break:break-word}
+  #problems li.error::before{content:"x "; color:var(--red); font-weight:700}
+  #problems li.warn::before{content:"! "; color:var(--amber); font-weight:700}
+  #problems li.error{color:#ffb3ae}
+  #problems li.warn{color:var(--amber-dim)}
+  #vstatus{padding:4px 7px; border:1px solid; font-weight:700; letter-spacing:1.2px; display:inline-block}
+  #vstatus.ok{color:var(--green); border-color:#2f6b3d; background:#0d1a10}
+  #vstatus.bad{color:var(--red); border-color:#7a2a25; background:#1a0d0c}
+  .note{color:var(--amber-faint); font-size:10px; line-height:1.4; margin:5px 0 0}
+  .hint{color:var(--amber-dim)}
+  details{margin-top:8px; border:1px solid var(--line); padding:5px 7px}
+  details summary{cursor:pointer; font-size:10px; letter-spacing:1px; color:var(--amber-dim)}
+  details[open] summary{margin-bottom:5px; color:var(--amber)}
+  kbd{border:1px solid var(--line); padding:0 3px; color:var(--amber)}
+  table.k{border-collapse:collapse; width:100%; font-size:10px}
+  table.k td{padding:1px 4px 1px 0; vertical-align:top; color:var(--amber-dim)}
+  table.k td:first-child{color:var(--amber); white-space:nowrap; width:96px}
+  #toast{position:fixed; right:14px; bottom:14px; background:var(--amber); color:var(--ink);
+    padding:6px 12px; font-weight:700; letter-spacing:1px; opacity:0; transition:opacity .18s;
+    pointer-events:none; z-index:9}
+  #toast.show{opacity:1}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>ROBOT OPERATOR<small>LEVEL DESIGNER</small></h1>
+  <select id="preset" title="Load one of the five shipping floors"></select>
+  <button id="btnLoadPreset">Load</button>
+  <button id="btnNew">New</button>
+  <div class="sep"></div>
+  <button id="btnZoomOut">&minus;</button><span id="zoomLbl" class="hint">3.0x</span><button id="btnZoomIn">+</button>
+  <div class="sep"></div>
+  <button id="tglLabels" class="on">Ids</button>
+  <button id="tglEnemy">Enemy fit r9</button>
+  <button id="tglRoutes">All routes</button>
+  <div class="sep"></div>
+  <button id="btnUndo">Undo</button>
+  <button id="btnSelftest" title="Round-trips all five presets through import+export">Self-test</button>
+</header>
+
+<main>
+  <section id="stage">
+    <canvas id="grid" width="100" height="100"></canvas>
+    <div id="readout">&nbsp;</div>
+  </section>
+
+  <aside>
+    <h2>Tool</h2>
+    <div class="row tight" id="tools"></div>
+    <p class="note">Left-drag paints. <kbd>Shift</kbd>+drag with a paint tool fills a rectangle.
+      Right-click erases to floor, or deletes an entity under the cursor.</p>
+
+    <h2>Entities</h2>
+    <div class="pal" id="palette"></div>
+
+    <h2>Selection</h2>
+    <div id="inspector"></div>
+
+    <h2>Validation</h2>
+    <div id="vstatus" class="ok">NO FLOOR</div>
+    <ul id="problems"></ul>
+
+    <h2>Route preview</h2>
+    <div class="row tight">
+      <button id="btnPickA">Set A</button>
+      <select id="snapA"></select>
+    </div>
+    <div class="row tight" style="margin-top:4px">
+      <button id="btnPickB">Set B</button>
+      <select id="snapB"></select>
+    </div>
+    <div class="row tight" style="margin-top:6px">
+      <button id="radR7" class="on">Robot r=7</button>
+      <button id="radR9">Enemy r=9</button>
+      <button id="btnClearRoute">Clear</button>
+    </div>
+    <p class="note" id="routeInfo">No route set.</p>
+
+    <h2>Export</h2>
+    <div class="row tight">
+      <button id="btnCopy">Copy</button>
+      <span class="hint">paste into <b>FLOORS</b> in client/src/sim/floors.ts</span>
+    </div>
+    <textarea id="out" rows="17" readonly spellcheck="false"></textarea>
+
+    <h2>Import</h2>
+    <textarea id="in" rows="7" spellcheck="false" placeholder="Paste a FloorDef object literal, or just 16 lines of 30 chars of # and . …"></textarea>
+    <button id="btnImport" class="wide">Load into editor</button>
+    <p class="note" id="importLog"></p>
+
+    <details>
+      <summary>KEYS &amp; RULES</summary>
+      <table class="k">
+        <tr><td>1 &hellip; 6</td><td>wall / floor / select / spawn / route A / route B</td></tr>
+        <tr><td>Esc</td><td>back to Select, clear selection</td></tr>
+        <tr><td>Del / Backspace</td><td>delete selected entity</td></tr>
+        <tr><td>Arrows</td><td>nudge selected entity 1 tile (<kbd>Alt</kbd> = half tile)</td></tr>
+        <tr><td>Ctrl/Cmd Z</td><td>undo</td></tr>
+      </table>
+      <p class="note">Walkability law from floors.ts: robot r=7, enemy r=9 &mdash; every passage
+        the enemy must use is &ge;2 tiles wide. Robot r=7 &lt; TILE/2, so any non-wall tile fits the robot.</p>
+    </details>
+
+    <details>
+      <summary>PINNED IDS THE DIRECTOR EXPECTS</summary>
+      <table class="k">
+        <tr><td>floor 1</td><td>elevA, elevB, pile1, pile2, scrap1</td></tr>
+        <tr><td>floor 2</td><td>elevA, elevB, chip_memory, cable1, scrap1</td></tr>
+        <tr><td>floor 3</td><td>elevA, elevB, crate_EARS, printer1, printer_nice, cable1, chip_magnet, scrap1, scrap2</td></tr>
+        <tr><td>floor 4</td><td>elevA, elevB, crate_BRAIN, printer1, cable1, fuse1, socket1, chip_zap, mop1, scrap1</td></tr>
+        <tr><td>floor 5</td><td>elevA, elevB, crate_triad, scrap1, scrap2</td></tr>
+      </table>
+      <p class="note">Rename at your peril: client/src/sim/selftest.ts fails the build if one goes missing.</p>
+    </details>
+  </aside>
+</main>
+
+<div id="toast"></div>
+
+<script>
+/* =====================================================================
+   ROBOT OPERATOR — LEVEL DESIGNER
+   Single self-contained file. No network, no build step, no imports.
+   Pathfinding below is a straight port of client/src/sim/pathfind.ts so
+   the reachability shown here is the reachability the game computes.
+   ===================================================================== */
+
+/* ------------------------------------------------------ contracts */
+var TILE = 16, TILES_X = 30, TILES_Y = 16;
+var ROBOT_R = 7, ENEMY_R = 9;
+var CHIP_IDS = ['MAGNET', 'RAGE', 'SCARED', 'MEMORY', 'ZAP', 'TOUGH'];
+
+/* Entity kinds, in palette order. `builder` is the helper in floors.ts. */
+var KINDS = {
+  elevatorA:      { glyph:'A',  color:'#7d8ea3', name:'elevator A (spawn)', unique:true },
+  elevatorB:      { glyph:'B',  color:'#4fd67a', name:'elevator B (exit)',  unique:true },
+  crate:          { glyph:'K',  color:'#ff9d3c', name:'crate' },
+  chip:           { glyph:'C',  color:'#5cc8ff', name:'loose chip' },
+  scrap:          { glyph:'$',  color:'#d9ae53', name:'scrap' },
+  fusedPrinter:   { glyph:'P',  color:'#ff5252', name:'fused printer (enemy)' },
+  printerInnocent:{ glyph:'p',  color:'#b98ae8', name:'nice printer (decoy)' },
+  cable:          { glyph:'Z',  color:'#f2e14c', name:'sparking cable' },
+  fuse:           { glyph:'F',  color:'#ffd24d', name:'fuse' },
+  fuseSocket:     { glyph:'S',  color:'#d977d9', name:'power socket' },
+  mop:            { glyph:'M',  color:'#7fd8bf', name:'mop' },
+  debris:         { glyph:'D',  color:'#8a7659', name:'debris pile' }
+};
+var KIND_ORDER = Object.keys(KINDS);
+/* Decor and hazards may sit anywhere; the rest must be reachable (selftest.ts). */
+var UNROUTED_KINDS = { debris:1, cable:1, elevatorA:1 };
+
+/* ------------------------------------------------------ physics port
+   isSolidTile / solidAtPx / circleRectOverlap from client/src/sim/physics.ts */
+function isSolidTile(solid, tx, ty) {
+  if (tx < 0 || ty < 0 || tx >= TILES_X || ty >= TILES_Y) return true;
+  return solid[ty][tx];
+}
+function solidAtPx(solid, x, y) {
+  return isSolidTile(solid, Math.floor(x / TILE), Math.floor(y / TILE));
+}
+function circleRectOverlap(cx, cy, r, rx, ry, rw, rh) {
+  var nx = Math.max(rx, Math.min(cx, rx + rw));
+  var ny = Math.max(ry, Math.min(cy, ry + rh));
+  var dx = cx - nx, dy = cy - ny;
+  return dx * dx + dy * dy < r * r;
+}
+/** True when a body of radius r can STAND at (x,y) without overlapping a wall. */
+function bodyFits(solid, x, y, r) {
+  var t0x = Math.floor((x - r) / TILE), t1x = Math.floor((x + r) / TILE);
+  var t0y = Math.floor((y - r) / TILE), t1y = Math.floor((y + r) / TILE);
+  for (var ty = t0y; ty <= t1y; ty++) {
+    for (var tx = t0x; tx <= t1x; tx++) {
+      if (!isSolidTile(solid, tx, ty)) continue;
+      if (circleRectOverlap(x, y, r, tx * TILE, ty * TILE, TILE, TILE)) return false;
+    }
+  }
+  return true;
+}
+
+/* ------------------------------------------------------ pathfind port
+   Verbatim from client/src/sim/pathfind.ts — 8-way A*, corner-cutting
+   banned, wall-hug penalty, then a radius-aware string pull. */
+var PF_N = TILES_X * TILES_Y;
+var DIAG = Math.SQRT2;
+var HUG_PENALTY = 0.35;
+var NEIGHBORS = [
+  [1, 0, 1], [-1, 0, 1], [0, 1, 1], [0, -1, 1],
+  [1, 1, DIAG], [1, -1, DIAG], [-1, 1, DIAG], [-1, -1, DIAG]
+];
+var gScore = new Float64Array(PF_N), fScore = new Float64Array(PF_N);
+var cameFrom = new Int32Array(PF_N), visitStamp = new Int32Array(PF_N);
+var closedSet = new Uint8Array(PF_N);
+var pfStamp = 0;
+var heap = new Int32Array(PF_N + 1), heapLen = 0;
+
+function heapPush(cell) {
+  var i = ++heapLen;
+  heap[i] = cell;
+  while (i > 1) {
+    var parent = i >> 1;
+    if (fScore[heap[parent]] <= fScore[heap[i]]) break;
+    var t = heap[parent]; heap[parent] = heap[i]; heap[i] = t;
+    i = parent;
+  }
+}
+function heapPop() {
+  var top = heap[1];
+  heap[1] = heap[heapLen--];
+  var i = 1;
+  for (;;) {
+    var l = i * 2, r = l + 1, best = i;
+    if (l <= heapLen && fScore[heap[l]] < fScore[heap[best]]) best = l;
+    if (r <= heapLen && fScore[heap[r]] < fScore[heap[best]]) best = r;
+    if (best === i) break;
+    var t = heap[best]; heap[best] = heap[i]; heap[i] = t;
+    i = best;
+  }
+  return top;
+}
+function octile(ax, ay, bx, by) {
+  var dx = Math.abs(ax - bx), dy = Math.abs(ay - by);
+  return dx > dy ? dx + (DIAG - 1) * dy : dy + (DIAG - 1) * dx;
+}
+function wallAdjacent(solid, tx, ty) {
+  return isSolidTile(solid, tx - 1, ty) || isSolidTile(solid, tx + 1, ty) ||
+         isSolidTile(solid, tx, ty - 1) || isSolidTile(solid, tx, ty + 1);
+}
+function tileOf(p) { return { tx: Math.floor(p.x / TILE), ty: Math.floor(p.y / TILE) }; }
+function centerOf(tx, ty) { return { x: tx * TILE + TILE / 2, y: ty * TILE + TILE / 2 }; }
+
+function clearPath(solid, a, b, r) {
+  var dx = b.x - a.x, dy = b.y - a.y;
+  var len = Math.hypot(dx, dy);
+  if (len < 1e-6) {
+    var t0 = tileOf(a);
+    return !isSolidTile(solid, t0.tx, t0.ty);
+  }
+  var nx = (-dy / len) * r, ny = (dx / len) * r;
+  var steps = Math.max(2, Math.ceil(len / (r * 0.9)));
+  var offs = [[0, 0], [nx, ny], [-nx, -ny]];
+  for (var i = 0; i <= steps; i++) {
+    var t = i / steps;
+    var cx = a.x + dx * t, cy = a.y + dy * t;
+    for (var k = 0; k < 3; k++) {
+      if (isSolidTile(solid, Math.floor((cx + offs[k][0]) / TILE), Math.floor((cy + offs[k][1]) / TILE))) return false;
+    }
+  }
+  return true;
+}
+
+function nearestWalkable(solid, p) {
+  var t = tileOf(p);
+  if (!isSolidTile(solid, t.tx, t.ty)) return { tx: t.tx, ty: t.ty };
+  for (var ring = 1; ring <= 4; ring++) {
+    var best = null, bestD = Infinity;
+    for (var dy = -ring; dy <= ring; dy++) {
+      for (var dx = -ring; dx <= ring; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== ring) continue;
+        var nx = t.tx + dx, ny = t.ty + dy;
+        if (isSolidTile(solid, nx, ny)) continue;
+        var c = centerOf(nx, ny);
+        var d = (c.x - p.x) * (c.x - p.x) + (c.y - p.y) * (c.y - p.y);
+        if (d < bestD) { bestD = d; best = { tx: nx, ty: ny }; }
+      }
+    }
+    if (best) return best;
+  }
+  return null;
+}
+
+/** Waypoints from `from` to `to`, EXCLUDING the start, in px. [] = no route. */
+function findPath(solid, from, to, radius) {
+  if (clearPath(solid, from, to, radius)) return [{ x: to.x, y: to.y }];
+
+  var start = nearestWalkable(solid, from);
+  var goal = nearestWalkable(solid, to);
+  if (!start || !goal) return [];
+  var startIdx = start.ty * TILES_X + start.tx;
+  var goalIdx = goal.ty * TILES_X + goal.tx;
+  if (startIdx === goalIdx) return [{ x: to.x, y: to.y }];
+
+  pfStamp++;
+  heapLen = 0;
+  gScore[startIdx] = 0;
+  fScore[startIdx] = octile(start.tx, start.ty, goal.tx, goal.ty);
+  cameFrom[startIdx] = -1;
+  visitStamp[startIdx] = pfStamp;
+  closedSet[startIdx] = 0;
+  heapPush(startIdx);
+
+  var found = false;
+  for (var guard = 0; guard < PF_N * 8 && heapLen > 0; guard++) {
+    var cur = heapPop();
+    if (closedSet[cur] === 1 && visitStamp[cur] === pfStamp) continue;
+    closedSet[cur] = 1;
+    if (cur === goalIdx) { found = true; break; }
+    var cx = cur % TILES_X;
+    var cy = (cur - cx) / TILES_X;
+    for (var n = 0; n < NEIGHBORS.length; n++) {
+      var dx = NEIGHBORS[n][0], dy = NEIGHBORS[n][1], cost = NEIGHBORS[n][2];
+      var nx = cx + dx, ny = cy + dy;
+      if (isSolidTile(solid, nx, ny)) continue;
+      if (dx !== 0 && dy !== 0 && (isSolidTile(solid, cx + dx, cy) || isSolidTile(solid, cx, cy + dy))) continue;
+      var nIdx = ny * TILES_X + nx;
+      if (visitStamp[nIdx] === pfStamp && closedSet[nIdx] === 1) continue;
+      var step = cost + (wallAdjacent(solid, nx, ny) ? HUG_PENALTY : 0);
+      var tentative = gScore[cur] + step;
+      if (visitStamp[nIdx] === pfStamp && tentative >= gScore[nIdx]) continue;
+      visitStamp[nIdx] = pfStamp;
+      closedSet[nIdx] = 0;
+      gScore[nIdx] = tentative;
+      fScore[nIdx] = tentative + octile(nx, ny, goal.tx, goal.ty);
+      cameFrom[nIdx] = cur;
+      heapPush(nIdx);
+    }
+  }
+  if (!found) return [];
+
+  var raw = [];
+  for (var c2 = goalIdx; c2 !== -1; c2 = cameFrom[c2]) {
+    var tx2 = c2 % TILES_X;
+    raw.push(centerOf(tx2, (c2 - tx2) / TILES_X));
+    if (raw.length > PF_N) break;
+  }
+  raw.reverse();
+  raw[0] = { x: from.x, y: from.y };
+  var lastCell = raw[raw.length - 1];
+  if (clearPath(solid, lastCell, to, radius)) raw.push({ x: to.x, y: to.y });
+
+  var out = [];
+  var i2 = 0;
+  while (i2 < raw.length - 1) {
+    var j = raw.length - 1;
+    while (j > i2 + 1 && !clearPath(solid, raw[i2], raw[j], radius)) j--;
+    out.push(raw[j]);
+    i2 = j;
+  }
+  return out;
+}
+
+/* ---------------------------------------------- enemy clearance field
+   findPath is cell-based, so it happily threads a 1-tile corridor even
+   at r=9. The enemy body is 18px across and physically cannot. This is
+   a sub-tile occupancy flood fill: sample every 4px, keep the samples
+   where the body actually fits, and see what connects to what. */
+var SAMP = 4;
+var SW = (TILES_X * TILE) / SAMP;   // 120
+var SH = (TILES_Y * TILE) / SAMP;   // 64
+function sampleXY(i, j) { return { x: i * SAMP + SAMP / 2, y: j * SAMP + SAMP / 2 }; }
+
+function buildFitField(solid, r) {
+  var fit = new Uint8Array(SW * SH);
+  for (var j = 0; j < SH; j++) {
+    for (var i = 0; i < SW; i++) {
+      var p = sampleXY(i, j);
+      fit[j * SW + i] = bodyFits(solid, p.x, p.y, r) ? 1 : 0;
+    }
+  }
+  return fit;
+}
+/** Index of the nearest fitting sample to a px point, or -1. */
+function nearestFit(fit, p) {
+  var ci = Math.min(SW - 1, Math.max(0, Math.round((p.x - SAMP / 2) / SAMP)));
+  var cj = Math.min(SH - 1, Math.max(0, Math.round((p.y - SAMP / 2) / SAMP)));
+  if (fit[cj * SW + ci] === 1) return cj * SW + ci;
+  for (var ring = 1; ring <= 6; ring++) {
+    for (var dj = -ring; dj <= ring; dj++) {
+      for (var di = -ring; di <= ring; di++) {
+        if (Math.max(Math.abs(di), Math.abs(dj)) !== ring) continue;
+        var i = ci + di, j = cj + dj;
+        if (i < 0 || j < 0 || i >= SW || j >= SH) continue;
+        if (fit[j * SW + i] === 1) return j * SW + i;
+      }
+    }
+  }
+  return -1;
+}
+/** Flood fill of fitting samples reachable from `from`. null = body does not fit there. */
+function fitReach(fit, from) {
+  var startIdx = nearestFit(fit, from);
+  if (startIdx < 0) return null;
+  var seen = new Uint8Array(SW * SH);
+  var queue = new Int32Array(SW * SH);
+  var head = 0, tail = 0;
+  queue[tail++] = startIdx;
+  seen[startIdx] = 1;
+  while (head < tail) {
+    var cur = queue[head++];
+    var i = cur % SW, j = (cur - i) / SW;
+    if (i > 0)      { var a = cur - 1;  if (!seen[a] && fit[a]) { seen[a] = 1; queue[tail++] = a; } }
+    if (i < SW - 1) { var b = cur + 1;  if (!seen[b] && fit[b]) { seen[b] = 1; queue[tail++] = b; } }
+    if (j > 0)      { var c = cur - SW; if (!seen[c] && fit[c]) { seen[c] = 1; queue[tail++] = c; } }
+    if (j < SH - 1) { var d = cur + SW; if (!seen[d] && fit[d]) { seen[d] = 1; queue[tail++] = d; } }
+  }
+  return seen;
+}
+/** Can the flood fill get a body within ~1.5 tiles of `to`? */
+function fitReaches(fit, seen, to) {
+  var ci = Math.min(SW - 1, Math.max(0, Math.round((to.x - SAMP / 2) / SAMP)));
+  var cj = Math.min(SH - 1, Math.max(0, Math.round((to.y - SAMP / 2) / SAMP)));
+  var span = 6; // 6 samples = 24px = 1.5 tiles
+  for (var dj = -span; dj <= span; dj++) {
+    for (var di = -span; di <= span; di++) {
+      var i = ci + di, j = cj + dj;
+      if (i < 0 || j < 0 || i >= SW || j >= SH) continue;
+      if (seen[j * SW + i]) return true;
+    }
+  }
+  return false;
+}
+
+/* ------------------------------------------------------ editor state */
+function blankState() {
+  var grid = [];
+  for (var y = 0; y < TILES_Y; y++) {
+    var row = [];
+    for (var x = 0; x < TILES_X; x++) {
+      row.push(y === 0 || y === TILES_Y - 1 || x === 0 || x === TILES_X - 1);
+    }
+    grid.push(row);
+  }
+  return { grid: grid, entities: [], spawn: null };
+}
+function cloneState(st) {
+  return JSON.parse(JSON.stringify(st));
+}
+function mapRows(st) {
+  return st.grid.map(function (row) {
+    return row.map(function (s) { return s ? '#' : '.'; }).join('');
+  });
+}
+function buildSolid(st) {
+  return st.grid.map(function (row) { return row.slice(); });
+}
+function entityPos(e) { return { x: e.tx * TILE + TILE / 2, y: e.ty * TILE + TILE / 2 }; }
+function findEntity(st, id) {
+  for (var i = 0; i < st.entities.length; i++) if (st.entities[i].id === id) return st.entities[i];
+  return null;
+}
+/** Where the robot appears: explicit spawn, else elevator A (it rode the shaft). */
+function spawnPoint(st) {
+  if (st.spawn) return { x: st.spawn.tx * TILE + TILE / 2, y: st.spawn.ty * TILE + TILE / 2 };
+  var a = null;
+  for (var i = 0; i < st.entities.length; i++) if (st.entities[i].kind === 'elevatorA') a = st.entities[i];
+  return a ? entityPos(a) : null;
+}
+
+function defaultLabel(e) {
+  switch (e.kind) {
+    case 'elevatorA': return 'dead elevator behind robot';
+    case 'elevatorB': return 'elevator';
+    case 'scrap': return 'scrap';
+    case 'chip': return String(e.option || '').toLowerCase() + ' chip';
+    case 'crate':
+      if (e.id === 'crate_BRAIN') return 'brain crate';
+      if (e.id === 'crate_triad') return 'shiny crate';
+      return e.option ? e.option.toLowerCase() + ' crate' : 'starter crate';
+    case 'debris': return 'pile of broken machines';
+    case 'cable': return 'sparking cable';
+    case 'fusedPrinter': return 'printer';
+    case 'printerInnocent': return 'nice printer';
+    case 'mop': return 'mop';
+    case 'fuse': return 'fuse';
+    case 'fuseSocket': return 'power socket';
+  }
+  return '';
+}
+
+var ID_BASE = {
+  crate: 'crate', scrap: 'scrap', debris: 'pile', cable: 'cable',
+  fusedPrinter: 'printer', mop: 'mop', fuse: 'fuse', fuseSocket: 'socket'
+};
+function uniqueId(st, base, bareFirst) {
+  var taken = {};
+  for (var i = 0; i < st.entities.length; i++) taken[st.entities[i].id] = 1;
+  if (bareFirst && !taken[base]) return base;
+  for (var n = 1; n < 200; n++) if (!taken[base + n]) return base + n;
+  return base + '_x';
+}
+function suggestId(st, kind, option) {
+  if (kind === 'elevatorA') return 'elevA';
+  if (kind === 'elevatorB') return 'elevB';
+  if (kind === 'chip') return uniqueId(st, 'chip_' + String(option || 'MEMORY').toLowerCase(), true);
+  if (kind === 'printerInnocent') return uniqueId(st, 'printer_nice', true);
+  return uniqueId(st, ID_BASE[kind] || kind, false);
+}
+function makeEntity(st, kind, tx, ty) {
+  var e = { id: '', kind: kind, tx: tx, ty: ty, label: '' };
+  if (kind === 'chip') e.option = 'MEMORY';
+  if (kind === 'fusedPrinter') e.hp = 3;
+  if (kind === 'elevatorB') e.dark = false;
+  e.id = suggestId(st, kind, e.option);
+  e.label = defaultLabel(e);
+  return e;
+}
+
+/* ------------------------------------------------------ export
+   Emits exactly the shape of the entries in client/src/sim/floors.ts. */
+function fmtNum(v) { return String(Math.round(v * 100) / 100); }
+function quote(s) {
+  return "'" + String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
+}
+function builderCall(e) {
+  var A = 'at(' + fmtNum(e.tx) + ', ' + fmtNum(e.ty) + ')';
+  switch (e.kind) {
+    case 'elevatorA': return 'elevA(' + A + ')';
+    case 'elevatorB': return e.dark ? 'elevB(' + A + ', true)' : 'elevB(' + A + ')';
+    case 'crate':
+      if (e.id === 'crate_BRAIN') return 'brainCrate(' + A + ')';
+      if (e.id === 'crate_triad') return 'triadCrate(' + A + ')';
+      return e.option
+        ? 'crate(' + quote(e.id) + ', ' + A + ', ' + quote(e.option) + ')'
+        : 'crate(' + quote(e.id) + ', ' + A + ')';
+    case 'chip': return 'chip(' + quote(e.id) + ', ' + A + ', ' + quote(e.option || 'MEMORY') + ')';
+    case 'scrap': return 'scrap(' + quote(e.id) + ', ' + A + ')';
+    case 'debris': return 'debris(' + quote(e.id) + ', ' + A + ')';
+    case 'cable': return 'cable(' + quote(e.id) + ', ' + A + ')';
+    case 'fusedPrinter': return 'printer(' + quote(e.id) + ', ' + A + ', ' + (e.hp == null ? 3 : e.hp) + ')';
+    case 'printerInnocent': return 'innocent(' + quote(e.id) + ', ' + A + ')';
+    case 'mop': return 'mop(' + quote(e.id) + ', ' + A + ')';
+    case 'fuse': return 'fuse(' + quote(e.id) + ', ' + A + ')';
+    case 'fuseSocket': return 'socket(' + quote(e.id) + ', ' + A + ')';
+  }
+  return 'null /* unknown kind ' + e.kind + ' */';
+}
+function entityCall(e) {
+  var base = builderCall(e);
+  var def = defaultLabel(e);
+  if (e.label && e.label !== def) return '{ ...' + base + ', label: ' + quote(e.label) + ' }';
+  return base;
+}
+/** Elevators first, everything else in placement order — the floors.ts convention. */
+function exportOrder(st) {
+  var a = [], b = [], rest = [];
+  for (var i = 0; i < st.entities.length; i++) {
+    var e = st.entities[i];
+    if (e.kind === 'elevatorA') a.push(e);
+    else if (e.kind === 'elevatorB') b.push(e);
+    else rest.push(e);
+  }
+  return a.concat(b, rest);
+}
+function exportFloor(st) {
+  var L = [];
+  L.push('  {');
+  L.push('    map: [');
+  mapRows(st).forEach(function (r) { L.push("      '" + r + "',"); });
+  L.push('    ],');
+  L.push('    entities: () => [');
+  exportOrder(st).forEach(function (e) { L.push('      ' + entityCall(e) + ','); });
+  L.push('    ],');
+  if (st.spawn) L.push('    spawn: at(' + fmtNum(st.spawn.tx) + ', ' + fmtNum(st.spawn.ty) + '),');
+  L.push('  },');
+  return L.join('\n');
+}
+
+/* ------------------------------------------------------ import
+   Forgiving: accepts a whole FloorDef literal, an entities-only block,
+   or 16 bare lines of map. Says what it could not read. */
+var RX_NUM = '(-?\\d+(?:\\.\\d+)?)';
+/** A quoted string, backslash escapes and all — labels contain apostrophes. */
+var RX_STR = "['\"]((?:[^'\"\\\\]|\\\\.)*)['\"]";
+var RX_AT = 'at\\s*\\(\\s*' + RX_NUM + '\\s*,\\s*' + RX_NUM + '\\s*\\)';
+function rx(body) { return new RegExp(body, 'g'); }
+function unquote(s) { return String(s).replace(/\\(.)/g, '$1'); }
+
+function parseFloor(text) {
+  var errors = [], warnings = [];
+  var st = blankState();
+  if (!text || !text.trim()) {
+    return { state: null, errors: ['Nothing to import — the box is empty.'], warnings: warnings };
+  }
+
+  /* --- map rows -------------------------------------------------- */
+  var rows = [];
+  var m, qre = /['"`]([#.]{30})['"`]/g;
+  while ((m = qre.exec(text)) !== null) rows.push(m[1]);
+  if (rows.length === 0) {
+    var lines = text.split('\n');
+    for (var i = 0; i < lines.length; i++) {
+      var t = lines[i].replace(/[,'"`\s]+$/, '').replace(/^[\s'"`]+/, '');
+      if (/^[#.]{30}$/.test(t)) rows.push(t);
+    }
+  }
+  if (rows.length === 0) {
+    var suspects = [], seenLen = {};
+    text.split('\n').forEach(function (ln) {
+      var t = ln.replace(/[^#.]/g, '');
+      if (t.length >= 8 && t.length !== 30 && !seenLen[t.length]) {
+        seenLen[t.length] = 1;
+        suspects.push(t.length);
+      }
+    });
+    errors.push('No map rows found. Need ' + TILES_Y + ' rows of exactly ' + TILES_X +
+      " characters of '#' and '.'." + (suspects.length ? ' Saw rows of length ' + suspects.join(', ') + '.' : ''));
+  } else if (rows.length < TILES_Y) {
+    errors.push('Found only ' + rows.length + ' map rows of ' + TILES_X + ' chars, need ' + TILES_Y + '. Missing rows left as open floor.');
+  } else if (rows.length > TILES_Y) {
+    warnings.push('Found ' + rows.length + ' map rows, using the first ' + TILES_Y + '.');
+  }
+  for (var y = 0; y < TILES_Y; y++) {
+    if (!rows[y]) continue;
+    for (var x = 0; x < TILES_X; x++) st.grid[y][x] = rows[y].charAt(x) === '#';
+  }
+
+  /* --- entities -------------------------------------------------- */
+  var hits = [];
+  function collect(re, make) {
+    var mm;
+    re.lastIndex = 0;
+    while ((mm = re.exec(text)) !== null) {
+      var e = make(mm);
+      if (e) hits.push({ at: mm.index, end: mm.index + mm[0].length, e: e });
+    }
+  }
+  collect(rx('\\belevA\\s*\\(\\s*' + RX_AT + '\\s*\\)'), function (g) {
+    return { id: 'elevA', kind: 'elevatorA', tx: +g[1], ty: +g[2] };
+  });
+  collect(rx('\\belevB\\s*\\(\\s*' + RX_AT + '\\s*(?:,\\s*(true|false)\\s*)?\\)'), function (g) {
+    return { id: 'elevB', kind: 'elevatorB', tx: +g[1], ty: +g[2], dark: g[3] === 'true' };
+  });
+  collect(rx('\\bbrainCrate\\s*\\(\\s*' + RX_AT + '\\s*\\)'), function (g) {
+    return { id: 'crate_BRAIN', kind: 'crate', tx: +g[1], ty: +g[2] };
+  });
+  collect(rx('\\btriadCrate\\s*\\(\\s*' + RX_AT + '\\s*\\)'), function (g) {
+    return { id: 'crate_triad', kind: 'crate', tx: +g[1], ty: +g[2] };
+  });
+  collect(rx('\\bcrate\\s*\\(\\s*' + RX_STR + '\\s*,\\s*' + RX_AT + '\\s*(?:,\\s*' + RX_STR + '\\s*)?\\)'), function (g) {
+    var e = { id: unquote(g[1]), kind: 'crate', tx: +g[2], ty: +g[3] };
+    if (g[4]) e.option = unquote(g[4]).toUpperCase();
+    return e;
+  });
+  collect(rx('\\bchip\\s*\\(\\s*' + RX_STR + '\\s*,\\s*' + RX_AT + '\\s*,\\s*' + RX_STR + '\\s*\\)'), function (g) {
+    return { id: unquote(g[1]), kind: 'chip', tx: +g[2], ty: +g[3], option: unquote(g[4]).toUpperCase() };
+  });
+  collect(rx('\\bprinter\\s*\\(\\s*' + RX_STR + '\\s*,\\s*' + RX_AT + '\\s*,\\s*(\\d+)\\s*\\)'), function (g) {
+    return { id: unquote(g[1]), kind: 'fusedPrinter', tx: +g[2], ty: +g[3], hp: +g[4] };
+  });
+  var SIMPLE = {
+    scrap: 'scrap', debris: 'debris', cable: 'cable', innocent: 'printerInnocent',
+    mop: 'mop', fuse: 'fuse', socket: 'fuseSocket'
+  };
+  Object.keys(SIMPLE).forEach(function (fn) {
+    collect(rx('\\b' + fn + '\\s*\\(\\s*' + RX_STR + '\\s*,\\s*' + RX_AT + '\\s*\\)'), function (g) {
+      return { id: unquote(g[1]), kind: SIMPLE[fn], tx: +g[2], ty: +g[3] };
+    });
+  });
+
+  hits.sort(function (p, q) { return p.at - q.at; });
+  var seenId = {};
+  hits.forEach(function (h) {
+    var e = h.e;
+    if (seenId[e.id]) warnings.push("Duplicate id '" + e.id + "' in the pasted text — both kept, rename one.");
+    seenId[e.id] = 1;
+    e.label = defaultLabel(e);
+    st.entities.push(e);
+  });
+
+  /* spread-with-custom-label form: { ...scrap('x', at(1, 2)), label: 'thing' } */
+  var lre = new RegExp('\\{\\s*\\.\\.\\.[^{}]*?label\\s*:\\s*' + RX_STR + '\\s*\\}', 'g');
+  var lm;
+  while ((lm = lre.exec(text)) !== null) {
+    for (var h = 0; h < hits.length; h++) {
+      if (hits[h].at > lm.index && hits[h].end <= lm.index + lm[0].length) hits[h].e.label = unquote(lm[1]);
+    }
+  }
+
+  /* --- spawn ------------------------------------------------------ */
+  var sm = new RegExp('spawn\\s*:\\s*' + RX_AT).exec(text);
+  if (sm) {
+    st.spawn = { tx: +sm[1], ty: +sm[2] };
+  } else {
+    var sp = /spawn\s*:\s*\{\s*x\s*:\s*(-?[\d.]+)\s*,\s*y\s*:\s*(-?[\d.]+)\s*\}/.exec(text);
+    if (sp) st.spawn = { tx: (+sp[1] - TILE / 2) / TILE, ty: (+sp[2] - TILE / 2) / TILE };
+  }
+
+  /* --- anything that looked like a builder call and was not read --- */
+  var pos = 0;
+  text.split('\n').forEach(function (ln) {
+    var start = pos;
+    pos += ln.length + 1;
+    var trimmed = ln.trim();
+    if (!/^[{.\s]*[A-Za-z_$][\w$]*\s*\(/.test(trimmed)) return;
+    if (/^(if|for|while|switch|function|return|export|const|let|var)\b/.test(trimmed)) return;
+    for (var h = 0; h < hits.length; h++) if (hits[h].at >= start && hits[h].at < pos) return;
+    warnings.push('Could not read this line, skipped: ' + trimmed.slice(0, 70));
+  });
+
+  if (st.entities.length === 0 && rows.length > 0) {
+    warnings.push('No entity builder calls found — loaded the map only.');
+  }
+  return { state: st, errors: errors, warnings: warnings };
+}
+
+/* ------------------------------------------------------ validation
+   Mirrors client/src/sim/selftest.ts: nothing inside a wall, chips have
+   robot clearance, and a route exists from spawn to everything that is
+   not decor. Plus the enemy-width law from the floors.ts header. */
+function validateState(st) {
+  var out = [];
+  function err(msg) { out.push({ level: 'error', msg: msg }); }
+  function warn(msg) { out.push({ level: 'warn', msg: msg }); }
+
+  if (st.grid.length !== TILES_Y) err('Map has ' + st.grid.length + ' rows, must be ' + TILES_Y + '.');
+  for (var y = 0; y < st.grid.length; y++) {
+    if (st.grid[y].length !== TILES_X) err('Map row ' + y + ' has ' + st.grid[y].length + ' columns, must be ' + TILES_X + '.');
+  }
+  var solid = buildSolid(st);
+
+  /* elevators + ids */
+  var elevAs = st.entities.filter(function (e) { return e.kind === 'elevatorA'; });
+  var elevBs = st.entities.filter(function (e) { return e.kind === 'elevatorB'; });
+  if (elevAs.length !== 1) err('Need exactly one elevator A, found ' + elevAs.length + '.');
+  if (elevBs.length !== 1) err('Need exactly one elevator B (the exit), found ' + elevBs.length + '.');
+  if (elevAs.length === 1 && elevAs[0].id !== 'elevA') err("Elevator A must keep the id 'elevA' — the director looks it up by name.");
+  if (elevBs.length === 1 && elevBs[0].id !== 'elevB') err("Elevator B must keep the id 'elevB' — the director looks it up by name.");
+
+  var seen = {};
+  st.entities.forEach(function (e) {
+    if (!e.id || !e.id.trim()) err('An entity of kind ' + e.kind + ' has no id.');
+    else if (seen[e.id]) err("Two entities share the id '" + e.id + "' — ids must be unique on a floor.");
+    else if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(e.id)) warn("Id '" + e.id + "' is not a plain identifier; keep to letters, digits and underscore.");
+    seen[e.id] = 1;
+    if (e.kind === 'chip' && !e.option) err("Chip '" + e.id + "' has no chip type set.");
+    if (e.label && e.label !== defaultLabel(e)) {
+      warn("'" + e.id + "' has a custom label; it exports as a spread override, which is fine but off-convention.");
+    }
+    if (e.tx < 0 || e.ty < 0 || e.tx >= TILES_X || e.ty >= TILES_Y) err("'" + e.id + "' sits outside the map.");
+  });
+
+  /* nothing inside a wall */
+  st.entities.forEach(function (e) {
+    var p = entityPos(e);
+    if (solidAtPx(solid, p.x, p.y)) err("'" + e.id + "' spawns inside a wall.");
+  });
+
+  /* spawn */
+  var spawn = spawnPoint(st);
+  if (!spawn) {
+    err('No spawn point: place an elevator A, or set an explicit spawn.');
+  } else if (solidAtPx(solid, spawn.x, spawn.y)) {
+    err('The robot spawns inside a wall.');
+  }
+
+  /* chip clearance — the r=7 body test from chipsReachable() */
+  var offs = [[0, 0], [-8, 0], [8, 0], [0, -8], [0, 8]];
+  st.entities.forEach(function (e) {
+    if (e.kind !== 'chip') return;
+    var p = entityPos(e);
+    for (var i = 0; i < offs.length; i++) {
+      if (solidAtPx(solid, p.x + offs[i][0], p.y + offs[i][1])) {
+        err("Chip '" + e.id + "' has no room for the robot body at offset (" + offs[i][0] + ',' + offs[i][1] + ') — it can be seen but never picked up.');
+        return;
+      }
+    }
+  });
+
+  /* routes — floorsRoutable() */
+  if (spawn) {
+    st.entities.forEach(function (e) {
+      if (UNROUTED_KINDS[e.kind]) return;
+      if (findPath(solid, spawn, entityPos(e), ROBOT_R).length === 0) {
+        err("No route from the robot spawn to '" + e.id + "' — that is a soft-locked floor.");
+      }
+    });
+  }
+
+  /* enemy width law — every printer must physically be able to come at you */
+  var printers = st.entities.filter(function (e) { return e.kind === 'fusedPrinter'; });
+  if (printers.length > 0 && spawn) {
+    var fit = buildFitField(solid, ENEMY_R);
+    printers.forEach(function (e) {
+      var p = entityPos(e);
+      if (!bodyFits(solid, p.x, p.y, ENEMY_R)) {
+        err("Enemy '" + e.id + "' is wedged: an r=9 body does not fit where it spawns. Needs 2 clear tiles around it.");
+        return;
+      }
+      var reach = fitReach(fit, p);
+      if (!reach) { err("Enemy '" + e.id + "' has nowhere to stand."); return; }
+      if (!fitReaches(fit, reach, spawn)) {
+        err("Enemy '" + e.id + "' cannot reach the robot spawn at r=9 — a passage on the way is under 2 tiles wide.");
+      }
+      elevBs.forEach(function (b) {
+        if (!fitReaches(fit, reach, entityPos(b))) {
+          warn("Enemy '" + e.id + "' cannot reach the exit elevator at r=9 — it can never contest the way out.");
+        }
+      });
+    });
+  }
+  return out;
+}
+
+/* ------------------------------------------------------ presets
+   Transcribed mechanically from client/src/sim/floors.ts (comments
+   stripped). Loaded through the same importer as pasted text. */
+var PRESETS = [
+  { name: 'FLOOR 1 — opening hall, asleep in the pile', src:
+"  {\n    map: [\n      '##############################',\n      '#............................#',\n      '#...####..............####...#',\n      '#...####..............####...#',\n      '#............................#',\n      '#............................#',\n      '#............................#',\n      '#............................#',\n      '#............................#',\n      '#............................#',\n      '#............................#',\n      '#...####..............####...#',\n      '#...####..............####...#',\n      '#............................#',\n      '#............................#',\n      '##############################',\n    ],\n    entities: () => [\n      elevA(at(2, 4)),\n      elevB(at(27, 12)),\n      debris('pile1', at(15, 8)),\n      debris('pile2', at(6, 14)),\n      scrap('scrap1', at(24, 5)),\n    ],\n    spawn: at(15, 8),\n  },"
+  },
+  { name: 'FLOOR 2 — one wall, two doors, cables in the near one', src:
+"  {\n    map: [\n      '##############################',\n      '#............##..............#',\n      '#............##..............#',\n      '#............##..............#',\n      '#............................#',\n      '#............................#',\n      '#............##..............#',\n      '#............##..............#',\n      '#............##..............#',\n      '#............##..............#',\n      '#............................#',\n      '#............................#',\n      '#............##..............#',\n      '#............##..............#',\n      '#............##..............#',\n      '##############################',\n    ],\n    entities: () => [\n      elevA(at(27, 8)),\n      elevB(at(2, 8)),\n      cable('cable1', at(13, 10)),\n      cable('cable2', at(14, 11)),\n      scrap('scrap1', at(16, 11)),\n      scrap('scrap2', at(17, 4)),\n      chip('chip_memory', at(5, 8), 'MEMORY'),\n      debris('pile2', at(24, 13)),\n    ],\n  },"
+  },
+  { name: 'FLOOR 3 — NEW EARS, first fused printer', src:
+"  {\n    map: [\n      '##############################',\n      '#............................#',\n      '#............................#',\n      '#............................#',\n      '#............................#',\n      '##############...#############',\n      '#............................#',\n      '#............................#',\n      '#............................#',\n      '#............................#',\n      '#............................#',\n      '#............................#',\n      '#............................#',\n      '#............................#',\n      '#............................#',\n      '##############################',\n    ],\n    entities: () => [\n      elevA(at(2, 3)),\n      elevB(at(27, 3)),\n      crate('crate_EARS', at(5, 3)),\n      printer('printer1', at(9, 10), 3),\n      innocent('printer_nice', at(15, 12)),\n      cable('cable1', at(21, 10)),\n      chip('chip_magnet', at(6, 12), 'MAGNET'),\n      scrap('scrap1', at(11, 3)),\n      scrap('scrap2', at(25, 12)),\n    ],\n  },"
+  },
+  { name: 'FLOOR 4 — the gauntlet, fuse and socket', src:
+"  {\n    map: [\n      '##############################',\n      '#............................#',\n      '#............................#',\n      '#............................#',\n      '#.......##..........##.......#',\n      '#.......##..........##.......#',\n      '#............................#',\n      '#.............##.............#',\n      '#.............##.............#',\n      '#............................#',\n      '#.......##..........##.......#',\n      '#.......##..........##.......#',\n      '#............................#',\n      '#............................#',\n      '#............................#',\n      '##############################',\n    ],\n    entities: () => [\n      elevA(at(27, 8)),\n      elevB(at(2, 8), true),\n      brainCrate(at(24, 8)),\n      socket('socket1', at(2, 5)),\n      fuse('fuse1', at(25, 3)),\n      printer('printer1', at(19, 7), 4),\n      cable('cable1', at(8, 7)),\n      chip('chip_zap', at(14, 3), 'ZAP'),\n      mop('mop1', at(14, 12)),\n      scrap('scrap1', at(23, 12)),\n    ],\n  },"
+  },
+  { name: 'FLOOR 5 — victory lap, triad island', src:
+"  {\n    map: [\n      '##############################',\n      '#............................#',\n      '#............................#',\n      '#............................#',\n      '#............................#',\n      '#............................#',\n      '#...........######...........#',\n      '#................#...........#',\n      '#................#...........#',\n      '#...........######...........#',\n      '#............................#',\n      '#............................#',\n      '#............................#',\n      '#............................#',\n      '#............................#',\n      '##############################',\n    ],\n    entities: () => [\n      elevA(at(2, 8)),\n      elevB(at(27, 8), true),\n      triadCrate(at(14.5, 7.5)),\n      scrap('scrap1', at(7, 3)),\n      scrap('scrap2', at(22, 12)),\n    ],\n  },"
+  }
+];
+
+/** Import -> export -> import -> export must be stable, and must not lose
+ *  entities or map rows. Wired to the SELF-TEST button. */
+function selfTest() {
+  var lines = [];
+  var bad = 0;
+  for (var i = 0; i < PRESETS.length; i++) {
+    var name = PRESETS[i].name.split('—')[0].trim();
+    var r1 = parseFloor(PRESETS[i].src);
+    if (!r1.state) { lines.push(name + ': IMPORT FAILED — ' + r1.errors.join(' ')); bad++; continue; }
+    var out1 = exportFloor(r1.state);
+    var r2 = parseFloor(out1);
+    var out2 = r2.state ? exportFloor(r2.state) : '(no state)';
+    var srcRows = (PRESETS[i].src.match(/['"`][#.]{30}['"`]/g) || []).length;
+    var problems = validateState(r1.state).filter(function (p) { return p.level === 'error'; });
+    var msgs = [];
+    if (out1 !== out2) msgs.push('export not idempotent');
+    if (srcRows !== TILES_Y) msgs.push('source had ' + srcRows + ' map rows');
+    if (r1.errors.length) msgs.push('import errors: ' + r1.errors.join('; '));
+    if (problems.length) msgs.push(problems.length + ' validation error(s): ' + problems[0].msg);
+    if (msgs.length) { bad++; lines.push(name + ': FAIL — ' + msgs.join(' | ')); }
+    else lines.push(name + ': ok (' + r1.state.entities.length + ' entities, round-trip stable, validates clean)');
+  }
+  lines.unshift(bad === 0 ? 'SELF-TEST PASS' : 'SELF-TEST: ' + bad + ' FLOOR(S) FAILED');
+  return { ok: bad === 0, text: lines.join('\n') };
+}
+
+/* =====================================================================
+   UI — everything below touches the DOM.
+   ===================================================================== */
+var S = blankState();
+var UI = {
+  tool: 'wall',
+  entityKind: null,
+  selected: null,
+  zoom: 3,
+  showIds: true,
+  showEnemy: false,
+  showRoutes: false,
+  routeA: null,
+  routeB: null,
+  routeR: ROBOT_R,
+  hover: null,
+  drag: null,
+  rect: null,
+  undo: [],
+  fitCache: null,
+  fitDirty: true
+};
+var TOOLS = [
+  { id: 'wall', label: 'Wall' },
+  { id: 'floor', label: 'Floor' },
+  { id: 'select', label: 'Select' },
+  { id: 'spawn', label: 'Spawn' },
+  { id: 'routeA', label: 'Route A' },
+  { id: 'routeB', label: 'Route B' }
+];
+var PAD = 14;            // ruler gutter, in world px
+var cv, ctx, off, offCtx;
+
+function $(id) { return document.getElementById(id); }
+
+function pushUndo() {
+  UI.undo.push(JSON.stringify(S));
+  if (UI.undo.length > 120) UI.undo.shift();
+}
+function undo() {
+  if (!UI.undo.length) { toast('nothing to undo'); return; }
+  S = JSON.parse(UI.undo.pop());
+  UI.selected = null;
+  UI.fitDirty = true;
+  refresh();
+}
+function toast(msg) {
+  var t = $('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(function () { t.classList.remove('show'); }, 1400);
+}
+
+/* ------------------------------------------------------ canvas draw */
+function resizeCanvas() {
+  var Z = UI.zoom;
+  var w = TILES_X * TILE + PAD * 2, h = TILES_Y * TILE + PAD * 2;
+  var dpr = window.devicePixelRatio || 1;
+  cv.style.width = (w * Z) + 'px';
+  cv.style.height = (h * Z) + 'px';
+  cv.width = Math.round(w * Z * dpr);
+  cv.height = Math.round(h * Z * dpr);
+  ctx.setTransform(Z * dpr, 0, 0, Z * dpr, 0, 0);
+  ctx.translate(PAD, PAD);
+  ctx.imageSmoothingEnabled = false;
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'center';
+}
+function mono(px, bold) { return (bold ? 'bold ' : '') + px + 'px ui-monospace,Menlo,Consolas,monospace'; }
+
+function fitField() {
+  if (UI.fitDirty || !UI.fitCache) {
+    UI.fitCache = buildFitField(buildSolid(S), ENEMY_R);
+    UI.fitDirty = false;
+  }
+  return UI.fitCache;
+}
+
+function draw() {
+  var W = TILES_X * TILE, H = TILES_Y * TILE;
+  var solid = buildSolid(S);
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = '#070605';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  ctx.restore();
+
+  /* ruler */
+  ctx.fillStyle = '#6b5210';
+  ctx.font = mono(6, false);
+  for (var rx0 = 0; rx0 < TILES_X; rx0++) ctx.fillText(String(rx0), rx0 * TILE + TILE / 2, -6);
+  for (var ry0 = 0; ry0 < TILES_Y; ry0++) ctx.fillText(String(ry0), -6, ry0 * TILE + TILE / 2);
+
+  /* tiles */
+  for (var y = 0; y < TILES_Y; y++) {
+    for (var x = 0; x < TILES_X; x++) {
+      if (solid[y][x]) {
+        ctx.fillStyle = '#332818';
+        ctx.fillRect(x * TILE, y * TILE, TILE, TILE);
+        if (!isSolidTile(solid, x, y - 1)) {
+          ctx.fillStyle = '#54432a';
+          ctx.fillRect(x * TILE, y * TILE, TILE, 2);
+        }
+      } else {
+        ctx.fillStyle = '#14120d';
+        ctx.fillRect(x * TILE, y * TILE, TILE, TILE);
+      }
+    }
+  }
+
+  /* enemy fit wash */
+  if (UI.showEnemy) {
+    var fit = fitField();
+    offCtx.clearRect(0, 0, W, H);
+    offCtx.fillStyle = 'rgba(90,220,255,0.20)';
+    for (var j = 0; j < SH; j++) {
+      for (var i = 0; i < SW; i++) {
+        if (fit[j * SW + i]) offCtx.fillRect(i * SAMP, j * SAMP, SAMP, SAMP);
+      }
+    }
+    ctx.drawImage(off, 0, 0, W, H);
+  }
+
+  /* grid */
+  ctx.lineWidth = 0.4;
+  ctx.strokeStyle = 'rgba(255,176,0,0.10)';
+  ctx.beginPath();
+  for (var gx = 0; gx <= TILES_X; gx++) { ctx.moveTo(gx * TILE, 0); ctx.lineTo(gx * TILE, H); }
+  for (var gy = 0; gy <= TILES_Y; gy++) { ctx.moveTo(0, gy * TILE); ctx.lineTo(W, gy * TILE); }
+  ctx.stroke();
+  ctx.lineWidth = 0.7;
+  ctx.strokeStyle = 'rgba(255,176,0,0.22)';
+  ctx.beginPath();
+  for (var gx2 = 0; gx2 <= TILES_X; gx2 += 5) { ctx.moveTo(gx2 * TILE, 0); ctx.lineTo(gx2 * TILE, H); }
+  for (var gy2 = 0; gy2 <= TILES_Y; gy2 += 5) { ctx.moveTo(0, gy2 * TILE); ctx.lineTo(W, gy2 * TILE); }
+  ctx.stroke();
+
+  var spawn = spawnPoint(S);
+
+  /* ghost routes from spawn to everything reachable */
+  if (UI.showRoutes && spawn) {
+    ctx.lineWidth = 0.9;
+    ctx.strokeStyle = 'rgba(110,231,135,0.30)';
+    S.entities.forEach(function (e) {
+      if (UNROUTED_KINDS[e.kind]) return;
+      var path = findPath(solid, spawn, entityPos(e), ROBOT_R);
+      if (!path.length) return;
+      ctx.beginPath();
+      ctx.moveTo(spawn.x, spawn.y);
+      path.forEach(function (p) { ctx.lineTo(p.x, p.y); });
+      ctx.stroke();
+    });
+  }
+
+  /* route preview */
+  if (UI.routeA && UI.routeB) {
+    var path2 = findPath(solid, UI.routeA, UI.routeB, UI.routeR);
+    ctx.lineWidth = 1.4;
+    ctx.strokeStyle = path2.length ? '#5cc8ff' : '#ff5f56';
+    if (path2.length) {
+      ctx.beginPath();
+      ctx.moveTo(UI.routeA.x, UI.routeA.y);
+      path2.forEach(function (p) { ctx.lineTo(p.x, p.y); });
+      ctx.stroke();
+      ctx.fillStyle = '#5cc8ff';
+      path2.forEach(function (p, idx) {
+        if (idx === path2.length - 1) return;
+        ctx.beginPath(); ctx.arc(p.x, p.y, 2, 0, Math.PI * 2); ctx.fill();
+      });
+    } else {
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.moveTo(UI.routeA.x, UI.routeA.y); ctx.lineTo(UI.routeB.x, UI.routeB.y); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+  if (UI.routeA) marker(UI.routeA, 'A', '#5cc8ff');
+  if (UI.routeB) marker(UI.routeB, 'B', '#5cc8ff');
+
+  /* entities */
+  S.entities.forEach(function (e) {
+    var k = KINDS[e.kind] || { glyph: '?', color: '#888' };
+    var p = entityPos(e);
+    var half = 6.5;
+    ctx.fillStyle = k.color;
+    ctx.fillRect(p.x - half, p.y - half, half * 2, half * 2);
+    ctx.lineWidth = 0.6;
+    ctx.strokeStyle = 'rgba(0,0,0,0.65)';
+    ctx.strokeRect(p.x - half, p.y - half, half * 2, half * 2);
+    ctx.fillStyle = '#0d0b07';
+    ctx.font = mono(9, true);
+    ctx.fillText(k.glyph, p.x, p.y + 0.5);
+    if (UI.showIds) {
+      ctx.font = mono(4.6, false);
+      ctx.fillStyle = 'rgba(0,0,0,0.75)';
+      ctx.fillRect(p.x - 15, p.y + 7, 30, 6);
+      ctx.fillStyle = k.color;
+      ctx.fillText(e.id, p.x, p.y + 10.2);
+    }
+    if (UI.selected === e.id) {
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = '#ffb000';
+      ctx.setLineDash([2, 2]);
+      ctx.strokeRect(p.x - half - 2.5, p.y - half - 2.5, half * 2 + 5, half * 2 + 5);
+      ctx.setLineDash([]);
+    }
+  });
+
+  /* spawn marker + robot body */
+  if (spawn) {
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = '#ffffff';
+    ctx.beginPath(); ctx.arc(spawn.x, spawn.y, ROBOT_R, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(spawn.x - 9, spawn.y); ctx.lineTo(spawn.x + 9, spawn.y);
+    ctx.moveTo(spawn.x, spawn.y - 9); ctx.lineTo(spawn.x, spawn.y + 9);
+    ctx.stroke();
+    ctx.font = mono(4.6, true);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText('SPAWN', spawn.x, spawn.y - 12);
+  }
+
+  /* rect preview */
+  if (UI.rect) {
+    var r0 = UI.rect;
+    var x0 = Math.min(r0.ax, r0.bx), x1 = Math.max(r0.ax, r0.bx);
+    var y0 = Math.min(r0.ay, r0.by), y1 = Math.max(r0.ay, r0.by);
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = r0.paint ? '#ffb000' : '#6ee787';
+    ctx.strokeRect(x0 * TILE, y0 * TILE, (x1 - x0 + 1) * TILE, (y1 - y0 + 1) * TILE);
+  }
+
+  /* hover */
+  if (UI.hover) {
+    ctx.lineWidth = 0.8;
+    ctx.strokeStyle = 'rgba(255,176,0,0.7)';
+    ctx.strokeRect(UI.hover.tx * TILE + 0.5, UI.hover.ty * TILE + 0.5, TILE - 1, TILE - 1);
+  }
+}
+function marker(p, letter, color) {
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = color;
+  ctx.beginPath(); ctx.arc(p.x, p.y, 4.5, 0, Math.PI * 2); ctx.stroke();
+  ctx.font = mono(6, true);
+  ctx.fillStyle = color;
+  ctx.fillText(letter, p.x, p.y - 8);
+}
+
+/* ------------------------------------------------------ interaction */
+function evtWorld(ev) {
+  var r = cv.getBoundingClientRect();
+  var Z = UI.zoom;
+  return { x: (ev.clientX - r.left) / Z - PAD, y: (ev.clientY - r.top) / Z - PAD };
+}
+function evtTile(ev) {
+  var w = evtWorld(ev);
+  return { tx: Math.floor(w.x / TILE), ty: Math.floor(w.y / TILE), wx: w.x, wy: w.y };
+}
+function inBounds(t) { return t.tx >= 0 && t.ty >= 0 && t.tx < TILES_X && t.ty < TILES_Y; }
+function hitEntity(w) {
+  var best = null, bestD = 81;
+  for (var i = 0; i < S.entities.length; i++) {
+    var p = entityPos(S.entities[i]);
+    var d = (p.x - w.x) * (p.x - w.x) + (p.y - w.y) * (p.y - w.y);
+    if (d <= bestD) { bestD = d; best = S.entities[i]; }
+  }
+  return best;
+}
+function paintTile(tx, ty, wall) {
+  if (tx < 0 || ty < 0 || tx >= TILES_X || ty >= TILES_Y) return;
+  if (S.grid[ty][tx] === wall) return;
+  S.grid[ty][tx] = wall;
+  UI.fitDirty = true;
+}
+function paintLine(ax, ay, bx, by, wall) {
+  var dx = Math.abs(bx - ax), dy = Math.abs(by - ay);
+  var sx = ax < bx ? 1 : -1, sy = ay < by ? 1 : -1;
+  var e = dx - dy, x = ax, y = ay;
+  for (var guard = 0; guard < 200; guard++) {
+    paintTile(x, y, wall);
+    if (x === bx && y === by) break;
+    var e2 = 2 * e;
+    if (e2 > -dy) { e -= dy; x += sx; }
+    if (e2 < dx) { e += dx; y += sy; }
+  }
+}
+
+function onDown(ev) {
+  var t = evtTile(ev);
+  var right = ev.button === 2;
+  if (ev.button !== 0 && !right) return;
+  ev.preventDefault();
+  cv.focus();
+
+  if (right) {
+    var hitR = hitEntity({ x: t.wx, y: t.wy });
+    pushUndo();
+    if (hitR) {
+      S.entities = S.entities.filter(function (e) { return e !== hitR; });
+      if (UI.selected === hitR.id) UI.selected = null;
+    } else if (inBounds(t)) {
+      paintTile(t.tx, t.ty, false);
+      UI.drag = { mode: 'paint', wall: false, last: t };
+    }
+    refresh();
+    return;
+  }
+
+  var tool = UI.tool;
+  if (tool === 'wall' || tool === 'floor') {
+    pushUndo();
+    var wall = tool === 'wall';
+    if (ev.shiftKey) {
+      UI.rect = { ax: t.tx, ay: t.ty, bx: t.tx, by: t.ty, paint: wall };
+      UI.drag = { mode: 'rect', wall: wall };
+    } else {
+      paintTile(t.tx, t.ty, wall);
+      UI.drag = { mode: 'paint', wall: wall, last: t };
+    }
+    refresh();
+    return;
+  }
+  if (tool === 'select') {
+    var hit = hitEntity({ x: t.wx, y: t.wy });
+    UI.selected = hit ? hit.id : null;
+    if (hit) {
+      pushUndo();
+      UI.drag = { mode: 'move', id: hit.id };
+    }
+    refresh();
+    return;
+  }
+  if (tool === 'spawn') {
+    if (!inBounds(t)) return;
+    pushUndo();
+    S.spawn = { tx: t.tx, ty: t.ty };
+    refresh();
+    return;
+  }
+  if (tool === 'routeA' || tool === 'routeB') {
+    if (!inBounds(t)) return;
+    var pt = { x: t.tx * TILE + TILE / 2, y: t.ty * TILE + TILE / 2 };
+    if (tool === 'routeA') UI.routeA = pt; else UI.routeB = pt;
+    refresh();
+    return;
+  }
+  if (tool === 'entity') {
+    if (!inBounds(t)) return;
+    if (KINDS[UI.entityKind] && KINDS[UI.entityKind].unique) {
+      var dup = S.entities.filter(function (e) { return e.kind === UI.entityKind; });
+      if (dup.length) {
+        pushUndo();
+        dup[0].tx = t.tx; dup[0].ty = t.ty;
+        UI.selected = dup[0].id;
+        toast('moved existing ' + UI.entityKind);
+        refresh();
+        return;
+      }
+    }
+    pushUndo();
+    var e2 = makeEntity(S, UI.entityKind, t.tx, t.ty);
+    S.entities.push(e2);
+    UI.selected = e2.id;
+    refresh();
+  }
+}
+function onMove(ev) {
+  var t = evtTile(ev);
+  UI.hover = inBounds(t) ? t : null;
+  if (UI.drag) {
+    if (UI.drag.mode === 'paint') {
+      paintLine(UI.drag.last.tx, UI.drag.last.ty, t.tx, t.ty, UI.drag.wall);
+      UI.drag.last = t;
+    } else if (UI.drag.mode === 'rect' && UI.rect) {
+      UI.rect.bx = Math.min(TILES_X - 1, Math.max(0, t.tx));
+      UI.rect.by = Math.min(TILES_Y - 1, Math.max(0, t.ty));
+    } else if (UI.drag.mode === 'move') {
+      var e = findEntity(S, UI.drag.id);
+      if (e && inBounds(t)) {
+        if (ev.altKey) { e.tx = Math.round(t.wx / (TILE / 2)) / 2 - 0.5; e.ty = Math.round(t.wy / (TILE / 2)) / 2 - 0.5; }
+        else { e.tx = t.tx; e.ty = t.ty; }
+      }
+    }
+    refresh();
+  } else {
+    draw();
+    updateReadout();
+  }
+}
+function onUp() {
+  if (UI.drag && UI.drag.mode === 'rect' && UI.rect) {
+    var r = UI.rect;
+    var x0 = Math.min(r.ax, r.bx), x1 = Math.max(r.ax, r.bx);
+    var y0 = Math.min(r.ay, r.by), y1 = Math.max(r.ay, r.by);
+    for (var y = y0; y <= y1; y++) for (var x = x0; x <= x1; x++) paintTile(x, y, r.paint);
+  }
+  UI.rect = null;
+  UI.drag = null;
+  refresh();
+}
+function onKey(ev) {
+  var tag = (ev.target && ev.target.tagName) || '';
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  var k = ev.key;
+  if ((ev.ctrlKey || ev.metaKey) && (k === 'z' || k === 'Z')) { ev.preventDefault(); undo(); return; }
+  if (k === 'Escape') { setTool('select'); UI.selected = null; refresh(); return; }
+  if (k === 'Delete' || k === 'Backspace') {
+    if (UI.selected) {
+      ev.preventDefault();
+      pushUndo();
+      S.entities = S.entities.filter(function (e) { return e.id !== UI.selected; });
+      UI.selected = null;
+      refresh();
+    }
+    return;
+  }
+  var idx = ['1', '2', '3', '4', '5', '6'].indexOf(k);
+  if (idx >= 0) { setTool(TOOLS[idx].id); return; }
+  if (k.indexOf('Arrow') === 0 && UI.selected) {
+    var e = findEntity(S, UI.selected);
+    if (!e) return;
+    ev.preventDefault();
+    var d = ev.altKey ? 0.5 : 1;
+    if (k === 'ArrowLeft') e.tx -= d;
+    if (k === 'ArrowRight') e.tx += d;
+    if (k === 'ArrowUp') e.ty -= d;
+    if (k === 'ArrowDown') e.ty += d;
+    refresh();
+  }
+}
+
+/* ------------------------------------------------------ panels */
+function setTool(id, kind) {
+  UI.tool = id;
+  UI.entityKind = kind || null;
+  Array.prototype.forEach.call(document.querySelectorAll('#tools button'), function (b) {
+    b.classList.toggle('on', b.dataset.tool === id);
+  });
+  Array.prototype.forEach.call(document.querySelectorAll('#palette button'), function (b) {
+    b.classList.toggle('on', id === 'entity' && b.dataset.kind === kind);
+  });
+}
+function buildTools() {
+  var host = $('tools');
+  host.innerHTML = '';
+  TOOLS.forEach(function (t, i) {
+    var b = document.createElement('button');
+    b.textContent = (i + 1) + ' ' + t.label;
+    b.dataset.tool = t.id;
+    b.onclick = function () { setTool(t.id); };
+    host.appendChild(b);
+  });
+}
+function buildPalette() {
+  var host = $('palette');
+  host.innerHTML = '';
+  KIND_ORDER.forEach(function (kind) {
+    var k = KINDS[kind];
+    var b = document.createElement('button');
+    b.dataset.kind = kind;
+    b.title = kind;
+    var sw = document.createElement('span');
+    sw.className = 'sw';
+    sw.style.background = k.color;
+    sw.textContent = k.glyph;
+    b.appendChild(sw);
+    b.appendChild(document.createTextNode(k.name));
+    b.onclick = function () { setTool('entity', kind); };
+    host.appendChild(b);
+  });
+}
+function field(label, node) {
+  var l = document.createElement('label');
+  l.className = 'f';
+  l.textContent = label;
+  var wrap = document.createElement('div');
+  wrap.appendChild(l);
+  wrap.appendChild(node);
+  return wrap;
+}
+function buildInspector() {
+  var host = $('inspector');
+  host.innerHTML = '';
+  var e = UI.selected ? findEntity(S, UI.selected) : null;
+  if (!e) {
+    var p = document.createElement('p');
+    p.className = 'note';
+    p.textContent = 'Nothing selected. Pick the Select tool and click an entity, or place one from the palette.';
+    host.appendChild(p);
+    if (S.spawn) {
+      var b = document.createElement('button');
+      b.className = 'wide';
+      b.textContent = 'Clear spawn override (use elevator A)';
+      b.onclick = function () { pushUndo(); S.spawn = null; refresh(); };
+      host.appendChild(b);
+    }
+    return;
+  }
+  var head = document.createElement('div');
+  head.className = 'hint';
+  head.textContent = (KINDS[e.kind] ? KINDS[e.kind].name : e.kind) + '  ·  ' + e.kind;
+  host.appendChild(head);
+
+  var idIn = document.createElement('input');
+  idIn.type = 'text';
+  idIn.value = e.id;
+  idIn.onchange = function () {
+    pushUndo();
+    var old = e.id;
+    e.id = idIn.value.trim();
+    if (e.label === defaultLabel({ kind: e.kind, id: old, option: e.option })) e.label = defaultLabel(e);
+    UI.selected = e.id;
+    refresh();
+  };
+  host.appendChild(field('id', idIn));
+
+  var lbIn = document.createElement('input');
+  lbIn.type = 'text';
+  lbIn.value = e.label;
+  lbIn.onchange = function () { pushUndo(); e.label = lbIn.value; refresh(); };
+  host.appendChild(field('label (what the parser hears)', lbIn));
+
+  var pos = document.createElement('div');
+  pos.className = 'row tight';
+  [['tx', 'tx'], ['ty', 'ty']].forEach(function (f) {
+    var n = document.createElement('input');
+    n.type = 'number';
+    n.step = '0.5';
+    n.value = e[f[0]];
+    n.style.width = '78px';
+    n.onchange = function () { pushUndo(); e[f[0]] = parseFloat(n.value) || 0; refresh(); };
+    var l = document.createElement('span');
+    l.className = 'hint';
+    l.textContent = f[1];
+    pos.appendChild(l);
+    pos.appendChild(n);
+  });
+  var px = document.createElement('span');
+  px.className = 'hint';
+  px.textContent = '= ' + entityPos(e).x + ',' + entityPos(e).y + 'px';
+  pos.appendChild(px);
+  host.appendChild(field('tile position', pos));
+
+  if (e.kind === 'chip' || e.kind === 'crate') {
+    var sel = document.createElement('select');
+    if (e.kind === 'crate') {
+      var none = document.createElement('option');
+      none.value = '';
+      none.textContent = '(none — starter/EARS/BRAIN crate)';
+      sel.appendChild(none);
+    }
+    CHIP_IDS.forEach(function (c) {
+      var o = document.createElement('option');
+      o.value = c; o.textContent = c;
+      sel.appendChild(o);
+    });
+    sel.value = e.option || '';
+    sel.onchange = function () {
+      pushUndo();
+      var wasDefault = e.label === defaultLabel(e);
+      var wasAuto = e.kind === 'chip' && e.id.indexOf('chip_') === 0;
+      e.option = sel.value || undefined;
+      if (wasAuto) { e.id = 'chip_' + String(e.option || 'memory').toLowerCase(); UI.selected = e.id; }
+      if (wasDefault) e.label = defaultLabel(e);
+      refresh();
+    };
+    host.appendChild(field('chip type (option)', sel));
+  }
+  if (e.kind === 'crate') {
+    var quick = document.createElement('div');
+    quick.className = 'row tight';
+    [['crate_EARS', 'EARS'], ['crate_BRAIN', 'BRAIN'], ['crate_triad', 'triad']].forEach(function (q) {
+      var b = document.createElement('button');
+      b.textContent = q[1];
+      b.onclick = function () {
+        pushUndo();
+        e.id = q[0];
+        e.option = undefined;
+        e.label = defaultLabel(e);
+        UI.selected = e.id;
+        refresh();
+      };
+      quick.appendChild(b);
+    });
+    host.appendChild(field('pinned crate ids', quick));
+  }
+  if (e.kind === 'fusedPrinter') {
+    var hp = document.createElement('input');
+    hp.type = 'number';
+    hp.min = '1';
+    hp.value = e.hp == null ? 3 : e.hp;
+    hp.onchange = function () { pushUndo(); e.hp = Math.max(1, parseInt(hp.value, 10) || 1); refresh(); };
+    host.appendChild(field('hp', hp));
+  }
+  if (e.kind === 'elevatorB') {
+    var dk = document.createElement('button');
+    dk.className = 'wide';
+    dk.textContent = e.dark ? 'DARK — needs power (fuse / triad)' : 'LIT — exit is open';
+    dk.classList.toggle('on', !!e.dark);
+    dk.onclick = function () { pushUndo(); e.dark = !e.dark; refresh(); };
+    host.appendChild(dk);
+  }
+
+  var actions = document.createElement('div');
+  actions.className = 'row tight';
+  actions.style.marginTop = '8px';
+  var bRoute = document.createElement('button');
+  bRoute.textContent = 'Route from spawn';
+  bRoute.onclick = function () {
+    var sp = spawnPoint(S);
+    if (!sp) { toast('no spawn'); return; }
+    UI.routeA = sp;
+    UI.routeB = entityPos(e);
+    refresh();
+  };
+  var bSpawn = document.createElement('button');
+  bSpawn.textContent = 'Spawn here';
+  bSpawn.onclick = function () { pushUndo(); S.spawn = { tx: e.tx, ty: e.ty }; refresh(); };
+  var bDel = document.createElement('button');
+  bDel.textContent = 'Delete';
+  bDel.onclick = function () {
+    pushUndo();
+    S.entities = S.entities.filter(function (x) { return x.id !== e.id; });
+    UI.selected = null;
+    refresh();
+  };
+  actions.appendChild(bRoute);
+  actions.appendChild(bSpawn);
+  actions.appendChild(bDel);
+  host.appendChild(actions);
+}
+
+function buildSnaps() {
+  [['snapA', 'routeA'], ['snapB', 'routeB']].forEach(function (pair) {
+    var sel = $(pair[0]);
+    var keep = sel.value;
+    sel.innerHTML = '';
+    var opts = [{ v: '', t: '(click the map)' }, { v: '@spawn', t: 'robot spawn' }];
+    S.entities.forEach(function (e) { opts.push({ v: e.id, t: e.id }); });
+    opts.forEach(function (o) {
+      var op = document.createElement('option');
+      op.value = o.v; op.textContent = o.t;
+      sel.appendChild(op);
+    });
+    sel.value = keep;
+    sel.onchange = function () {
+      var v = sel.value;
+      var pt = null;
+      if (v === '@spawn') pt = spawnPoint(S);
+      else if (v) { var e = findEntity(S, v); pt = e ? entityPos(e) : null; }
+      if (pt) { UI[pair[1]] = pt; refresh(); }
+    };
+  });
+}
+
+function updateValidation() {
+  var probs = validateState(S);
+  var errs = probs.filter(function (p) { return p.level === 'error'; });
+  var st = $('vstatus');
+  if (errs.length === 0) {
+    st.className = 'ok';
+    st.textContent = probs.length ? 'PLAYABLE — ' + probs.length + ' NOTE(S)' : 'PLAYABLE — ALL CHECKS PASS';
+  } else {
+    st.className = 'bad';
+    st.textContent = errs.length + ' PROBLEM' + (errs.length > 1 ? 'S' : '');
+  }
+  var ul = $('problems');
+  ul.innerHTML = '';
+  probs.forEach(function (p) {
+    var li = document.createElement('li');
+    li.className = p.level;
+    li.textContent = p.msg;
+    ul.appendChild(li);
+  });
+}
+function updateRouteInfo() {
+  var el = $('routeInfo');
+  if (!UI.routeA || !UI.routeB) { el.textContent = 'Set A and B to draw the route the robot would really take.'; return; }
+  var path = findPath(buildSolid(S), UI.routeA, UI.routeB, UI.routeR);
+  if (!path.length) {
+    el.innerHTML = '<b style="color:#ff5f56">NO ROUTE</b> at r=' + UI.routeR + ' — nothing connects A to B.';
+    return;
+  }
+  var len = 0, prev = UI.routeA;
+  path.forEach(function (p) { len += Math.hypot(p.x - prev.x, p.y - prev.y); prev = p; });
+  el.textContent = path.length + ' leg(s), ' + Math.round(len) + 'px (' + (len / TILE).toFixed(1) +
+    ' tiles) at r=' + UI.routeR + '. Corners are where the robot turns.';
+}
+function updateReadout() {
+  var parts = [];
+  if (UI.hover) {
+    parts.push('tile ' + UI.hover.tx + ',' + UI.hover.ty);
+    parts.push('px ' + (UI.hover.tx * TILE + 8) + ',' + (UI.hover.ty * TILE + 8));
+    parts.push(S.grid[UI.hover.ty][UI.hover.tx] ? 'WALL' : 'floor');
+  } else {
+    parts.push('—');
+  }
+  parts.push(S.entities.length + ' entities');
+  parts.push(UI.tool === 'entity' ? 'placing ' + UI.entityKind : 'tool: ' + UI.tool);
+  $('readout').textContent = parts.join('   ·   ');
+}
+function refresh() {
+  draw();
+  buildInspector();
+  buildSnaps();
+  updateValidation();
+  updateRouteInfo();
+  updateReadout();
+  $('out').value = exportFloor(S);
+}
+
+/* ------------------------------------------------------ boot */
+function loadPreset(i) {
+  var r = parseFloor(PRESETS[i].src);
+  if (!r.state) { toast('preset failed to load'); return; }
+  pushUndo();
+  S = r.state;
+  UI.selected = null;
+  UI.fitDirty = true;
+  UI.routeA = spawnPoint(S);
+  var b = null;
+  S.entities.forEach(function (e) { if (e.kind === 'elevatorB') b = e; });
+  UI.routeB = b ? entityPos(b) : null;
+  refresh();
+}
+function doImport() {
+  var r = parseFloor($('in').value);
+  var log = $('importLog');
+  if (!r.state) {
+    log.innerHTML = '<b style="color:#ff5f56">NOT LOADED</b> — ' + r.errors.join(' ');
+    return;
+  }
+  pushUndo();
+  S = r.state;
+  UI.selected = null;
+  UI.fitDirty = true;
+  refresh();
+  var msg = 'Loaded ' + S.entities.length + ' entities.';
+  if (r.errors.length) msg = '<b style="color:#ff5f56">Loaded with problems:</b> ' + r.errors.join(' ') + ' ' + msg;
+  if (r.warnings.length) msg += ' <span style="color:#ffb000">' + r.warnings.join(' ') + '</span>';
+  log.innerHTML = msg;
+}
+function copyOut() {
+  var ta = $('out');
+  ta.focus();
+  ta.select();
+  var done = false;
+  try { done = document.execCommand('copy'); } catch (err) { done = false; }
+  if (!done && navigator.clipboard) {
+    navigator.clipboard.writeText(ta.value).then(function () { toast('copied'); }, function () { toast('press Cmd/Ctrl+C'); });
+    return;
+  }
+  toast(done ? 'copied' : 'press Cmd/Ctrl+C');
+}
+
+function boot() {
+  cv = $('grid');
+  ctx = cv.getContext('2d');
+  off = document.createElement('canvas');
+  off.width = TILES_X * TILE;
+  off.height = TILES_Y * TILE;
+  offCtx = off.getContext('2d');
+
+  var sel = $('preset');
+  PRESETS.forEach(function (p, i) {
+    var o = document.createElement('option');
+    o.value = String(i);
+    o.textContent = p.name;
+    sel.appendChild(o);
+  });
+
+  buildTools();
+  buildPalette();
+  setTool('wall');
+
+  $('btnLoadPreset').onclick = function () { loadPreset(parseInt($('preset').value, 10) || 0); };
+  $('btnNew').onclick = function () {
+    pushUndo();
+    S = blankState();
+    UI.selected = null; UI.fitDirty = true; UI.routeA = null; UI.routeB = null;
+    refresh();
+  };
+  $('btnZoomIn').onclick = function () { UI.zoom = Math.min(5, UI.zoom + 0.5); applyZoom(); };
+  $('btnZoomOut').onclick = function () { UI.zoom = Math.max(1.5, UI.zoom - 0.5); applyZoom(); };
+  $('tglLabels').onclick = function () { UI.showIds = !UI.showIds; this.classList.toggle('on', UI.showIds); draw(); };
+  $('tglEnemy').onclick = function () { UI.showEnemy = !UI.showEnemy; this.classList.toggle('on', UI.showEnemy); draw(); };
+  $('tglRoutes').onclick = function () { UI.showRoutes = !UI.showRoutes; this.classList.toggle('on', UI.showRoutes); draw(); };
+  $('btnUndo').onclick = undo;
+  $('btnSelftest').onclick = function () {
+    var r = selfTest();
+    $('importLog').innerHTML = '<b style="color:' + (r.ok ? '#6ee787' : '#ff5f56') + '">' +
+      r.text.split('\n')[0] + '</b><br>' + r.text.split('\n').slice(1).join('<br>');
+    toast(r.ok ? 'self-test pass' : 'self-test FAILED');
+  };
+  $('btnPickA').onclick = function () { setTool('routeA'); };
+  $('btnPickB').onclick = function () { setTool('routeB'); };
+  $('btnClearRoute').onclick = function () { UI.routeA = null; UI.routeB = null; refresh(); };
+  $('radR7').onclick = function () {
+    UI.routeR = ROBOT_R; this.classList.add('on'); $('radR9').classList.remove('on'); refresh();
+  };
+  $('radR9').onclick = function () {
+    UI.routeR = ENEMY_R; this.classList.add('on'); $('radR7').classList.remove('on'); refresh();
+  };
+  $('btnCopy').onclick = copyOut;
+  $('btnImport').onclick = doImport;
+
+  cv.addEventListener('mousedown', onDown);
+  cv.addEventListener('mousemove', onMove);
+  cv.addEventListener('mouseleave', function () { UI.hover = null; draw(); });
+  window.addEventListener('mouseup', onUp);
+  cv.addEventListener('contextmenu', function (ev) { ev.preventDefault(); });
+  window.addEventListener('keydown', onKey);
+
+  applyZoom();
+  loadPreset(0);
+}
+function applyZoom() {
+  $('zoomLbl').textContent = UI.zoom.toFixed(1) + 'x';
+  resizeCanvas();
+  draw();
+}
+
+if (typeof document !== 'undefined' && typeof document.getElementById === 'function') boot();
+</script>
+</body>
+</html>

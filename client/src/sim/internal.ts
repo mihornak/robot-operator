@@ -7,9 +7,9 @@
  * function of the call sequence and is never serialized mid-run — a restart
  * always goes through initialState(), which starts from fresh scratch.
  */
-import type { Entity, SimEvent, SimEventType, SimState, Vec } from '../../../shared/types';
+import type { Entity, Order, SimEvent, SimEventType, SimState, Vec } from '../../../shared/types';
 import { rngNext } from '../../../shared/rng';
-import { dist } from './physics';
+import { dist, losBlocked } from './physics';
 
 // ---------------------------------------------------------------- tuning
 
@@ -68,6 +68,79 @@ export const REPULSE_SWIRL = 0.5;
 /** hide lands ON the cover point (goto's 12px slop could leave LOS leaking). */
 export const HIDE_ARRIVE = 6;
 
+/** Route-cost radius around an avoided thing, in tiles. */
+export const AVOID_PENALTY_TILES = 2;
+/** Route cost at the centre of an avoided thing, in tile-steps. Deliberately
+ *  larger than the whole map's diagonal: when a clean route exists at all, it
+ *  wins, which is what makes "avoid the sparks" change the DOOR the robot
+ *  picks and not merely how it wobbles on the way through. */
+export const AVOID_PENALTY_COST = 60;
+
+// Navigation (A* + string pull, sim/pathfind.ts).
+/** Ticks between route refreshes. Cheap enough to re-plan constantly, which is
+ *  what makes the robot recover instantly from shoves, knockback and doors. */
+export const NAV_REPATH_TICKS = 20;
+/** A waypoint is "reached" this close — smaller than the body, so corners are
+ *  actually rounded rather than pivoted around at arm's length. */
+export const NAV_WAYPOINT_ARRIVE = 5;
+/** A moving target sliding this far invalidates the plan immediately. */
+export const NAV_TARGET_DRIFT = 14;
+
+// Initiative (the robot playing the game on its own).
+/**
+ * Ticks of standing still before the robot decides anything UNPROMPTED. The
+ * player has to be able to finish a sentence, and a companion that bolts the
+ * instant an order completes reads as a runaway rather than as a partner.
+ * Danger and deliveries skip this — those reactions are supposed to be fast.
+ */
+export const INITIATIVE_SETTLE = 110;
+/** Ticks of having genuinely nothing left to do before it asks the operator. */
+export const IDLE_ASK_TICKS = 300;
+/** Self-directed pickups only bother with loot practically underfoot. Wide
+ *  radii turned every idle moment into a shopping trip across the room. */
+export const GATHER_RADIUS = 75;
+/** Below this range a robot under "avoid enemies" breaks off and backs away. */
+export const RETREAT_TRIGGER = 110;
+/** Hard cap on one retreat episode, so backing off can't become the whole game. */
+export const RETREAT_TICKS = 240;
+
+/**
+ * RAGE budget, in ticks. RAGE hijacks an order that would disengage — but only
+ * for this long, then it relents and the order runs. Without a cap the robot
+ * fixates on a machine it cannot even reach and stops obeying anything, which
+ * reads as a hung game rather than as a personality.
+ * Refills whenever no hostile is in sight, so every fresh encounter gets one.
+ */
+export const RAGE_BUDGET_TICKS = 200; // ~3.3s of "no, ROBOT is busy"
+
+/** explore: arrival slop at a point of interest before moving to the next. */
+export const EXPLORE_ARRIVE = 16;
+/** explore: minimum distance of a random wander leg when nothing is left to visit. */
+export const EXPLORE_WANDER_MIN = 70;
+/** explore: ticks of wall-shoving before the current leg is abandoned for another. */
+export const EXPLORE_GIVEUP_TICKS = 90;
+
+/**
+ * Entity kinds the robot will walk over to look at, whether touring on the
+ * player's order or on its own initiative. Hostiles and hazards are absent —
+ * curiosity must never be a suicide order. So is elevator B: leaving the floor
+ * is the operator's decision, and a robot that sightsees its way into the lift
+ * ends the level nobody asked to end.
+ */
+export const EXPLORE_KINDS: ReadonlySet<string> = new Set([
+  'chip',
+  'crate',
+  'fuse',
+  'fuseSocket',
+  'scrap',
+  'printerInnocent',
+  'mop',
+  'debris',
+]);
+
+/** Wander legs keep this far clear of elevator B for the same reason. */
+export const ELEVATOR_KEEPOUT = 48;
+
 // ---------------------------------------------------------------- scratch
 
 export interface RobotScratch {
@@ -85,9 +158,37 @@ export interface RobotScratch {
   moveTraveledPx: number;
   /** Cover point the CURRENT hide order seeks; computed on the order's first tick. */
   hideTarget: Vec | null;
+  /** RAGE override ticks left for this encounter; refills when nothing is in sight. */
+  rageTicks: number;
+  /** explore: entity currently being walked to, or null when on a wander leg. */
+  exploreTargetId: string | null;
+  /** explore: destination point of the current leg. */
+  explorePoint: Vec | null;
+  /** explore: ids already visited this floor, so the tour keeps moving on. */
+  exploreSeen: string[];
   /** Quiet-posture ticks after a careful order completes — stealth doesn't
    *  evaporate the instant the robot arrives and loiters in enemy territory. */
   sneakLingerTicks: number;
+  /** Planned route (px waypoints, start excluded) for the current destination. */
+  navPath: Vec[];
+  /** Index of the waypoint currently being walked to. */
+  navIndex: number;
+  /** Destination the current plan was made for; null = no plan. */
+  navGoal: Vec | null;
+  /** Ticks until the route may be re-planned. */
+  navCooldown: number;
+  /** Last plan found no route at all (caller reports it instead of shoving). */
+  navFailed: boolean;
+  /** Reusable per-cell route-cost grid for avoided things; null until needed. */
+  navPenalty: Float64Array | null;
+  /** Ticks the robot has been standing around with no order at all. */
+  idleTicks: number;
+  /** threat_seen already called for the hostile currently in view. */
+  threatCalled: boolean;
+  /** Ticks of having nothing to do before need_orders fires again. */
+  idleAskCd: number;
+  /** Ticks left in the current retreat episode. */
+  retreatTicks: number;
 }
 
 export function newScratch(): RobotScratch {
@@ -99,8 +200,62 @@ export function newScratch(): RobotScratch {
     magnetTargetId: null,
     moveTraveledPx: 0,
     hideTarget: null,
+    rageTicks: RAGE_BUDGET_TICKS,
+    exploreTargetId: null,
+    explorePoint: null,
+    exploreSeen: [],
     sneakLingerTicks: 0,
+    navPath: [],
+    navIndex: 0,
+    navGoal: null,
+    navCooldown: 0,
+    navFailed: false,
+    navPenalty: null,
+    idleTicks: 0,
+    threatCalled: false,
+    idleAskCd: IDLE_ASK_TICKS,
+    retreatTicks: 0,
   };
+}
+
+/** Drop the current route. Any change of destination must go through this. */
+export function clearNav(scratch: RobotScratch): void {
+  scratch.navPath = [];
+  scratch.navIndex = 0;
+  scratch.navGoal = null;
+  scratch.navCooldown = 0;
+  scratch.navFailed = false;
+}
+
+/**
+ * Install an order and reset every per-order counter. THE single entry point,
+ * shared by the director (player orders) and the robot's own initiative — two
+ * code paths writing `robot.order` with different resets is how stale nudge
+ * distances and stale routes leak between tasks.
+ */
+export function applyOrder(
+  state: SimState,
+  scratch: RobotScratch,
+  order: Order | null,
+  selfDriven: boolean,
+): void {
+  const r = state.robot;
+  r.order = order;
+  r.selfDriven = order !== null && selfDriven;
+  r.wallBumpTicks = 0;
+  scratch.rageNotified = false;
+  scratch.magnetTargetId = null; // a fresh order outranks the shiny detour
+  scratch.moveTraveledPx = 0; // nudge distance counts from the fresh order
+  scratch.hideTarget = null; // a fresh hide/retreat order picks cover anew
+  scratch.explorePoint = null; // a fresh explore order starts a fresh leg
+  scratch.exploreTargetId = null;
+  scratch.retreatTicks = RETREAT_TICKS;
+  scratch.idleTicks = 0; // anything happening restarts the settle clock
+  clearNav(scratch);
+  if (order === null) {
+    r.vel.x = 0;
+    r.vel.y = 0;
+  }
 }
 
 // ---------------------------------------------------------------- helpers
@@ -146,6 +301,21 @@ export function nearestHostile(state: SimState): Entity | null {
     }
   }
   return best;
+}
+
+/** How far the robot notices things. The floor-3 EARS crate (tier 2) widens it. */
+export function sightOf(state: SimState): number {
+  return state.robot.tier >= 2 ? SIGHT + 70 : SIGHT;
+}
+
+/** Nearest hostile the robot can actually SEE — in range and not behind a
+ *  wall. Personality chips firing on a machine in the next room is where the
+ *  old behaviour used to lock up, so every reaction goes through this. */
+export function hostileInSight(state: SimState): Entity | null {
+  const e = nearestHostile(state);
+  if (e === null) return null;
+  if (dist(state.robot.pos, e.pos) > sightOf(state)) return null;
+  return losBlocked(state.solid, state.robot.pos, e.pos) ? null : e;
 }
 
 /** Elevator B is powered unless the floor marked it 'dark' (floor 4 fuse gate; floors 2/5 triad gate — powerElevatorB lights it). */

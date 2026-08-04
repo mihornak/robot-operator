@@ -8,17 +8,22 @@ import type {
   ChipId,
   CommandSource,
   GamePhase,
+  MicHelp,
+  ModuleId,
   Order,
   ParseRequest,
   ParsedCommand,
+  PlanStep,
   RenderApp,
+  SayRequest,
+  SayTrigger,
   SimEvent,
   SimState,
   UiState,
   Utterance,
 } from '@shared/types';
-import { TICK_MS } from '@shared/types';
-import { CHIPS, TRIADS } from '@shared/content';
+import { TICK_MS, TILE, UPGRADE_LAND_MS, UPGRADE_TOTAL_MS, standingLabels } from '@shared/types';
+import { CHIPS, MODULES, TRIADS } from '@shared/content';
 import { BANK_BY_ID, LINE_GROUPS } from '@shared/voiceLines';
 import { makeRng } from '@shared/rng';
 
@@ -26,10 +31,11 @@ import * as sim from '../sim/index';
 import { initArt } from '../art/index';
 import { createRenderApp } from '../render/index';
 import { createAudioEngine } from '../audio/engine';
-import { WebSpeechSource } from '../voice/webspeech';
+import { SILENT_RMS, WebSpeechSource } from '../voice/webspeech';
 import { TeletypeSource } from '../voice/teletype';
 import { parseLocal } from '../voice/localParser';
-import { apiParse, logEvent } from '../net/api';
+import { apiParse, apiSay, logEvent } from '../net/api';
+import type { SpeechPriority } from './speech';
 import { SpeechQueue } from './speech';
 
 const uiRng = makeRng(0xc0ffee); // presentation-only randomness
@@ -51,6 +57,54 @@ const DID_BY_CAUSE: Record<string, string> = {
   enemy: 'HUGGED ANGRY MACHINE.',
 };
 
+/**
+ * Mic troubleshooting copy, one entry per fault. Deliberately concrete and
+ * ordered by likelihood — "check your input device" is useless advice on its
+ * own, so each step names the thing to click. The card always ends with the
+ * teletype, because the typed path is guaranteed to work (CLAUDE.md rule 4).
+ */
+const MIC_HELP: Record<MicHelp['fault'], MicHelp> = {
+  unsupported: {
+    fault: 'unsupported',
+    title: 'This browser has no speech recognition.',
+    steps: [
+      'Chrome, Edge or Arc on desktop will work.',
+      'Safari and Firefox will not.',
+      'Or play by typing — press any letter key.',
+    ],
+  },
+  denied: {
+    fault: 'denied',
+    title: 'Microphone permission was refused.',
+    steps: [
+      'Click the padlock / mic icon left of the address bar.',
+      'Set Microphone to Allow, then reload the page.',
+      'Or play by typing — press any letter key.',
+    ],
+  },
+  silent: {
+    fault: 'silent',
+    title: 'Permission is fine, but no sound is reaching us.',
+    steps: [
+      'Check the input device in your OS sound settings.',
+      'Unmute the mic — hardware switches count.',
+      'Watch the bar below and speak: it should move.',
+    ],
+  },
+  noWords: {
+    fault: 'noWords',
+    title: 'Sound arrives, but no words come back.',
+    steps: [
+      'Speak a little louder, a little closer.',
+      'Recognition is English — try a short English phrase.',
+      'Or play by typing — press any letter key.',
+    ],
+  },
+};
+
+/** Pre-wake: the thing in the pile shifts on this cadence (ms). */
+const STIR_EVERY_MS = 4200;
+
 export async function startGame(host: HTMLElement): Promise<void> {
   const d = new Director(host);
   await d.init();
@@ -69,10 +123,21 @@ class Director {
     teletypeActive: false,
     stickyNote: true, // taped to the monitor before the monitor is even on
     talkHint: false,
+    micHelp: null,
+    micLevel: 0,
+    pileStir: 0,
     deathCard: null,
     ceremonyOptions: null,
+    upgrade: null,
     headToCameraMs: 0,
     moodGlyph: '',
+    orders: [],
+    objective: '',
+    plan: [],
+    hp: 6,
+    maxHp: 6,
+    hpFlash: 0,
+    awaitingBriefing: true,
     danger: 0,
     degrade: 0,
   };
@@ -88,6 +153,8 @@ class Director {
   private awaitingName = false;
   private awaitingFirstOrder = false; // between "WHAT X DO?" and the first command
   private playerGivenName: string | null = null;
+  /** Everything installed, in the order it went in — the OSD strip IS this list. */
+  private modules: ModuleId[] = [];
   private ceremony: { options: ChipId[]; floor: number } | null = null;
   private ceremonyNudged = false;
   private firstBumpDone = false;
@@ -97,9 +164,30 @@ class Director {
   private lastUtteranceAt = 0;
   private lastHeard = '…';
   private lastDid = 'WOKE UP.';
+  /** Rolling "VOICE: … / ROBOT: …" log handed to the parser as conversation memory. */
+  private dialogue: string[] = [];
+  /** Pre-wake pile theatre. */
+  private lastStirAt = 0;
+  private stirCount = 0;
+  /** Presses that produced no words, since the last one that did. */
+  private emptyPresses = 0;
+  private micHelpUntil = 0;
   private lowHpSaidFloor = -1;
-  /** BRAIN one-level "X then Y" chain — runs on order_done, voided by any world break. */
-  private pendingThen: ParsedCommand | null = null;
+  /** Remaining steps of the operator's plan, in order. Stepped through on
+   *  order_done; voided by any world break (death, floor change, ceremony). */
+  private pendingPlan: PlanStep[] = [];
+  /** A question the ROBOT asked and is waiting on, so a bare "yes" has meaning. */
+  private pendingQuestion: string | null = null;
+  /** What "yes" would execute. Never runs without the player agreeing to it. */
+  private pendingProposal: ParsedCommand | null = null;
+  private questionUntil = 0;
+  /** One unprompted line in flight at a time, on a floor of silence between them. */
+  private sayInFlight = false;
+  private lastSayAt = 0;
+  /** Unanswered asks in a row. Drives the ask → shorter ask → shut up ladder. */
+  private askStreak = 0;
+  /** Earliest the robot may make an unprompted noise again (randomised). */
+  private nextIdleVoiceAt = 0;
   /** Kind of the last order the director set — sim nulls robot.order before order_done fires. */
   private lastOrderKind: Order['kind'] | null = null;
   private parsing = false;
@@ -164,11 +252,17 @@ class Director {
       const f = parseInt(q.get('floor') ?? '', 10);
       if (f >= 1 && f <= 5) {
         this.woken = true;
+        sim.wakeRobot(this.state);
         this.awaitingFirstOrder = false;
         this.playerGivenName = (q.get('name') ?? 'SPARKY').toUpperCase();
         this.state.robot.name = this.playerGivenName;
-        if (q.get('tier') === '1' || f >= 4) this.state.robot.tier = 1;
+        if (q.get('ears') === '1' || f >= 4) sim.applyEars(this.state); // EARS crate is floor 3
         if (f >= 5) sim.applyBrain(this.state); // BRAIN crate is floor 4
+        // …and the OSD strip has to agree with what was just installed, or the
+        // dev shortcut lies about the state it just built.
+        if (this.state.robot.tier >= 2) this.modules.push('EARS');
+        if (this.state.robot.ideas) this.modules.push('BRAIN');
+        this.ui.glyphs = [...this.modules];
         sim.loadFloor(this.state, f - 1);
         if (!this.state.robot.hasMemory) this.state.robot.name = null;
         this.ui.phase = 'play';
@@ -259,6 +353,10 @@ class Director {
     // Teletype auto-activates on any printable char (space stays PTT until
     // there's a buffer); Escape closes it. The typed path must ALWAYS work.
     if (e.key === 'Escape') {
+      if (this.ui.micHelp) {
+        this.dismissMicHelp();
+        return;
+      }
       this.teletype.setActive(false);
       this.ui.teletypeActive = false;
       return;
@@ -308,9 +406,9 @@ class Director {
     this.ui.pttHeld = false;
     this.audio.playSfx('radio_off');
     if (!this.speechSource) {
-      // No mic path: PTT release just prompts the teletype.
+      // No mic path at all: say so plainly and open the typed path.
       this.ui.micState = 'idle';
-      if (this.woken) this.speech.sayBank('teletype', 'bark');
+      this.showMicHelp('unsupported');
       this.teletype.setActive(true);
       this.ui.teletypeActive = true;
       return;
@@ -319,21 +417,69 @@ class Director {
     const u = await this.speechSource.stop();
     if (!u || !u.text.trim()) {
       this.ui.micState = 'idle';
-      if (!this.woken) {
-        // The robot heard SOMETHING (static counts). Never leave dead air on
-        // the first press — waking on any PTT is the relationship beat.
-        this.wake();
-      } else if (!this.speechSource.available) {
-        // Mic died (permission revoked) — hint the always-working path.
-        this.speech.sayBank('teletype', 'ack');
-        this.teletype.setActive(true);
-        this.ui.teletypeActive = true;
-      } else {
-        this.speech.sayBank('mumbly', 'ack');
+      this.onEmptyPress();
+      return;
+    }
+    this.emptyPresses = 0;
+    this.dismissMicHelp();
+    await this.handleUtterance(u);
+  }
+
+  /**
+   * A press that produced no words. The robot must NOT wake off this and must
+   * NOT claim the voice was mumbly — there may have been no voice at all. We
+   * work out which of the four failure modes it actually was and say so.
+   */
+  private onEmptyPress(): void {
+    this.emptyPresses++;
+    const src = this.speechSource instanceof WebSpeechSource ? this.speechSource : null;
+    const d = src?.diagnose();
+    const heardAudio = (d?.peakRms ?? 0) >= SILENT_RMS;
+
+    if (!this.woken) {
+      // Pre-wake: the pile stirs — proof the game is alive — but the robot
+      // stays asleep. Waking is reserved for words that actually arrived.
+      this.stir();
+      if (this.emptyPresses >= 2) {
+        this.showMicHelp(!d || d.permission === 'denied' ? 'denied' : heardAudio ? 'noWords' : 'silent');
       }
       return;
     }
-    await this.handleUtterance(u);
+
+    if (d && d.permission === 'denied') {
+      this.showMicHelp('denied');
+      this.teletype.setActive(true);
+      this.ui.teletypeActive = true;
+      return;
+    }
+    if (!heardAudio) {
+      // Silence is not mumbling. Nothing reached the mic; don't blame the player.
+      if (this.emptyPresses >= 2) this.showMicHelp('silent');
+      return;
+    }
+    // Real audio, no words — THIS is what "mumbly" was always meant for.
+    this.speech.sayBank('mumbly', 'ack');
+    if (this.emptyPresses >= 3) this.showMicHelp('noWords');
+  }
+
+  private showMicHelp(fault: MicHelp['fault']): void {
+    if (this.ui.micHelp?.fault !== fault) this.audio.blip('warn');
+    this.ui.micHelp = MIC_HELP[fault];
+    this.micHelpUntil = performance.now() + 30000;
+  }
+
+  private dismissMicHelp(): void {
+    this.ui.micHelp = null;
+    this.micHelpUntil = 0;
+  }
+
+  /** Something moves under the heap: one soft clunk + a render shudder. */
+  private stir(): void {
+    this.lastStirAt = performance.now();
+    this.ui.pileStir = 1;
+    this.stirCount++;
+    this.audio.playSfx('bump', { volume: 0.35, rate: 0.55 + uiRng() * 0.15 });
+    if (this.stirCount % 3 === 0) this.audio.playSfx('servo', { volume: 0.3, rate: 0.7 });
   }
 
   // ---------------------------------------------------------------- boot & beats
@@ -371,17 +517,34 @@ class Director {
     setTimeout(() => {
       if (!this.woken) this.ui.talkHint = true;
     }, 19400);
+    // No mic at all: say so early rather than letting them press space at a
+    // heap of junk forever. With a mic we stay quiet and let them try.
+    setTimeout(() => {
+      if (!this.woken && !this.speechSource) this.showMicHelp('unsupported');
+    }, 9000);
   }
 
   private wake(): void {
     this.woken = true;
     this.ui.talkHint = false;
+    this.dismissMicHelp();
     this.ui.headToCameraMs = 2000;
+    this.ui.pileStir = 0;
+    // The pile bursts, the robot launches out of it, and only THEN does it
+    // speak. Everything before this frame was a heap of dead machines.
+    sim.wakeRobot(this.state);
     this.audio.playSfx('servo');
+    this.audio.playSfx('bump', { volume: 0.9, rate: 0.7 });
+    this.render.fx.shake(4, 320);
+    this.render.fx.glitchFrame();
     // Keep the wake SHORT: hi + the name ask, then wait. Less is more.
     this.speech.sayBank('wake_hello', 'beat', 600);
     this.speech.sayBank('wake_name_ask', 'beat');
     this.awaitingName = true;
+    // It has just met the operator; wandering off mid-introduction would throw
+    // away the one beat the whole opening is built on. Initiative starts once
+    // it has a name.
+    sim.setAutonomy(this.state, false);
     this.lastIdleAt = performance.now() + 4000; // silence timer starts after the ask
     logEvent('wake');
     // Silent refusal → self-name after 9s of nothing.
@@ -409,6 +572,7 @@ class Director {
     this.state.robot.name = name;
     this.awaitingName = false;
     this.awaitingFirstOrder = true;
+    sim.setAutonomy(this.state, true);
     this.armWaitLadder();
     this.speech.sayText(`ROBOT IS ${name}. ${name} IS GOOD AT THINGS.`, 'beat', 500);
     this.speech.sayText(`WHAT ${name} DO?`, 'beat');
@@ -424,6 +588,7 @@ class Director {
     if (!this.awaitingName) return;
     this.awaitingName = false;
     this.awaitingFirstOrder = true;
+    sim.setAutonomy(this.state, true);
     this.armWaitLadder();
     this.playerGivenName = 'ROBOT';
     this.state.robot.name = 'ROBOT';
@@ -436,13 +601,20 @@ class Director {
 
   private async handleUtterance(u: Utterance): Promise<void> {
     this.ui.talkHint = false;
+    this.emptyPresses = 0;
+    this.dismissMicHelp(); // words arrived; whatever was wrong isn't anymore
     this.lastUtteranceAt = performance.now();
     this.lastIdleAt = performance.now();
+    // Somebody answered. The robot is allowed to be curious again.
+    this.askStreak = 0;
+    this.nextIdleVoiceAt = 0;
     if (this.awaitingFirstOrder) this.armWaitLadder();
     this.ui.headToCameraMs = 900;
     logEvent('utterance', { source: u.source, shouted: u.shouted ? 1 : 0 });
 
     if (!this.woken) {
+      // THE relationship beat, and it is earned: this only runs once real words
+      // have come through, so a broken mic can never fake it.
       this.ui.micState = 'idle';
       this.wake();
       return;
@@ -464,19 +636,169 @@ class Director {
     this.apply(cmd);
   }
 
+  /** Keep the last few turns of both sides — the parser's conversation memory. */
+  private remember(line: string): void {
+    this.dialogue.push(line);
+    if (this.dialogue.length > 8) this.dialogue.splice(0, this.dialogue.length - 8);
+  }
+
+  /**
+   * The robot speaks because the WORLD did something — it arrived somewhere,
+   * noticed something, ran out of things to do. The sentence is written per
+   * situation by /api/say rather than pulled from the line bank, which is the
+   * whole difference between a companion and a jukebox.
+   *
+   * Everything about this path is fail-soft and non-blocking: one request in
+   * flight, a floor of quiet between lines, a bank line when the network or the
+   * keys aren't there, and silence rather than talking over an ack.
+   */
+  private voice(
+    trigger: SayTrigger,
+    detail: string,
+    opts: { priority?: SpeechPriority; minGapMs?: number; bank?: string } = {},
+  ): void {
+    const priority = opts.priority ?? 'bark';
+    const minGap = opts.minGapMs ?? 5000;
+    const now = performance.now();
+    const fallback = (): void => {
+      if (opts.bank) this.speech.sayBank(opts.bank, priority);
+    };
+    // Barks lose to anything already being said; asking the model for a line
+    // that SpeechQueue would drop anyway is a wasted call and a wasted second.
+    if (this.sayInFlight || now - this.lastSayAt < minGap) return;
+    if (priority !== 'beat' && this.speech.busy) {
+      fallback();
+      return;
+    }
+    if (this.ui.pttHeld || this.parsing) return; // never talk over the operator
+
+    this.sayInFlight = true;
+    this.lastSayAt = now;
+    const epoch = this.runEpoch;
+    const r = this.state.robot;
+    const req: SayRequest = {
+      trigger,
+      detail,
+      floor: this.state.floorIndex + 1,
+      robotName: r.name,
+      personality: r.chips,
+      standing: r.standing,
+      ideas: r.ideas,
+      hp: r.hp,
+      maxHp: r.maxHp,
+      carrying: r.carrying !== null,
+      entities: sim.visibleEntities(this.state),
+      recent: [...this.dialogue],
+    };
+    void apiSay(req)
+      .then((res) => {
+        if (epoch !== this.runEpoch || !this.simRunning()) return;
+        const line = res.line.trim().toUpperCase();
+        if (!line) {
+          fallback();
+          return;
+        }
+        this.speech.sayText(line, priority);
+        this.remember(`ROBOT: ${line}`);
+        this.lastHeard = line;
+        // Anything the robot suggested is something "yes" can now mean. An
+        // outright question stays live longer than a passing remark, but both
+        // are answerable — a player who says "do it" after "SHINY CRATE OVER
+        // THERE" is agreeing, and being told there was no question is deadening.
+        if (res.proposal) {
+          this.pendingQuestion = line;
+          this.pendingProposal = {
+            intent: res.proposal.intent,
+            ...(res.proposal.target ? { target: res.proposal.target } : {}),
+            ...(res.proposal.dir ? { dir: res.proposal.dir } : {}),
+            ack_line: 'ROBOT DOES IT.',
+          };
+          this.questionUntil = performance.now() + (res.question ? 25000 : 12000);
+        }
+      })
+      .catch(() => {
+        if (epoch === this.runEpoch) fallback();
+      })
+      .finally(() => {
+        this.sayInFlight = false;
+      });
+  }
+
+  private clearQuestion(): void {
+    this.pendingQuestion = null;
+    this.pendingProposal = null;
+    this.questionUntil = 0;
+  }
+
+  /** Hold all unprompted noise for at least this long. */
+  private quietFor(ms: number): void {
+    this.nextIdleVoiceAt = Math.max(this.nextIdleVoiceAt, performance.now() + ms);
+  }
+
+  /**
+   * The robot has nothing to do and nobody is answering.
+   *
+   * Asking twice is company; asking six times is a fault light. So it asks
+   * ONCE properly, once more in three words, and then stops asking altogether
+   * and simply exists out loud — hums, spins, says something strange — on a
+   * randomised and steadily longer clock. The randomness matters as much as
+   * the escalation: a noise on a fixed timer stops reading as a personality
+   * and starts reading as a loop.
+   */
+  private idleVoice(now: number): void {
+    if (now < this.nextIdleVoiceAt) return;
+    const streak = this.askStreak++;
+    const jitter = (base: number, spread: number): number => base + uiRng() * spread;
+    if (streak === 0) {
+      this.voice('idle_ask', 'has run out of things to do and wants a job', {
+        priority: 'idle',
+        minGapMs: 0,
+      });
+      this.nextIdleVoiceAt = now + jitter(10000, 9000);
+      return;
+    }
+    if (streak === 1) {
+      this.voice(
+        'idle_ask',
+        'already asked once and got no reply — ask again but MUCH shorter, three words at most, and still suggest something',
+        { priority: 'idle', minGapMs: 0 },
+      );
+      this.nextIdleVoiceAt = now + jitter(18000, 16000);
+      return;
+    }
+    // Given up on being answered. Entertain itself instead.
+    if (uiRng() < 0.35) this.audio.playSfx('spin');
+    this.voice(
+      'banter',
+      'has been waiting a long while with no reply and has stopped expecting one — do NOT ask for orders, do NOT offer a plan, just say something idle and strange to itself',
+      { priority: 'idle', minGapMs: 0, bank: pick(LINE_GROUPS.idle) },
+    );
+    this.nextIdleVoiceAt = now + jitter(26000, 40000);
+  }
+
   private async parse(u: Utterance): Promise<ParsedCommand> {
+    const src = this.speechSource instanceof WebSpeechSource ? this.speechSource : null;
+    this.remember(`VOICE: ${u.text}`);
+    const r = this.state.robot;
     const req: ParseRequest = {
       utterance: u.text,
-      tier: this.state.robot.tier,
+      alternatives: u.source === 'speech' ? (src?.alternatives ?? []) : [],
+      tier: r.tier,
       floor: this.state.floorIndex + 1,
-      robotName: this.state.robot.name,
-      personality: this.state.robot.chips,
+      robotName: r.name,
+      personality: r.chips,
       options: this.ceremony ? this.ceremony.options : null,
       awaitingName: this.awaitingName,
-      brain: this.state.robot.brain,
+      brain: r.brain,
       entities: sim.visibleEntities(this.state),
-      recent: [this.lastHeard],
+      recent: [...this.dialogue],
       shouted: u.shouted,
+      standing: r.standing,
+      pendingQuestion: this.pendingQuestion,
+      busy: sim.describeOrder(this.state),
+      hp: r.hp,
+      maxHp: r.maxHp,
+      carrying: r.carrying !== null,
     };
     try {
       return await apiParse(req);
@@ -486,11 +808,17 @@ class Director {
         options: req.options,
         awaitingName: req.awaitingName,
         entities: req.entities,
+        brain: req.brain,
+        pendingQuestion: req.pendingQuestion,
       });
     }
   }
 
-  private apply(cmd: ParsedCommand): void {
+  /**
+   * @param fromPlan true when this is the next step of a plan already running,
+   *   which is the one case that must NOT wipe the queue it came out of.
+   */
+  private apply(cmd: ParsedCommand, fromPlan = false): void {
     logEvent('command', {
       intent: cmd.intent,
       source: cmd.source ?? 'llm',
@@ -499,8 +827,10 @@ class Director {
       refused: 0,
     });
 
-    // A fresh utterance voids any queued "then" from the previous one.
-    this.pendingThen = null;
+    // A fresh utterance replaces the old plan wholesale. Half-merging a new
+    // instruction into a stale queue is how a robot ends up doing something
+    // nobody asked for two orders later.
+    if (!fromPlan) this.pendingPlan = [];
 
     if (this.awaitingName) {
       if (cmd.intent === 'name_robot' && cmd.name) this.applyName(cmd.name);
@@ -508,21 +838,47 @@ class Director {
       return;
     }
 
+    // "yes" / "no" only mean something against the question the robot asked.
+    if (cmd.intent === 'affirm' || cmd.intent === 'deny') {
+      const proposal = this.pendingProposal;
+      this.clearQuestion();
+      if (cmd.intent === 'affirm' && proposal) {
+        // Hand the agreed plan straight back through apply(), which speaks the
+        // ack and installs the order exactly as if the player had said it.
+        this.apply({ ...proposal, ack_line: cmd.ack_line });
+        return;
+      }
+      this.lastHeard = cmd.ack_line.toUpperCase();
+      this.remember(`ROBOT: ${this.lastHeard}`);
+      this.speech.sayText(cmd.ack_line, 'ack');
+      if (cmd.intent === 'deny') this.setOrder({ kind: 'stop' });
+      return;
+    }
+    // Any other real utterance answers the question by superseding it.
+    this.clearQuestion();
+
+    // Standing rules ride along with whatever else was said, and they are
+    // applied BEFORE the order so the order runs under the new rules from its
+    // very first tick — "go to the lift and avoid them" must not sprint into a
+    // printer for a second while the policy catches up.
+    if (cmd.directives && cmd.directives.length > 0) {
+      const st = sim.applyDirectives(this.state, cmd.directives);
+      this.ui.orders = standingLabels(st);
+      logEvent('directives', { kinds: cmd.directives.join(',') });
+    }
+
+    // Being told ANYTHING substantive ends the hold at the floor entrance —
+    // a rule or an answer counts as a briefing just as much as an order does.
+    if (cmd.intent !== 'chatter' && cmd.intent !== 'clarify') sim.clearBriefing(this.state);
+
     // Safety net: "what can you do"-style chatter must never be dead air.
     // If the parser (server or local) returned no reply, answer by tier.
     if (cmd.intent === 'chatter' && !(cmd.ack_line ?? '').trim()) {
-      cmd = {
-        ...cmd,
-        ack_line:
-          this.state.robot.tier === 0
-            ? 'ROBOT KNOWS GO, STOP, SHOOT.'
-            : this.state.robot.brain
-              ? 'ROBOT HIDES. AVOIDS. MAKES PLANS.'
-              : 'ROBOT GOES TO THINGS NOW. SAY THING.',
-      };
+      cmd = { ...cmd, ack_line: 'ROBOT GOES. FIGHTS. HIDES. GRABS.' };
     }
 
     this.lastHeard = cmd.ack_line.toUpperCase();
+    this.remember(`ROBOT: ${this.lastHeard}`);
     if (cmd.insult) {
       sim.sulk(this.state, 180);
       this.audio.blip('warn');
@@ -533,9 +889,10 @@ class Director {
     // The repeat-back — never the transcript.
     this.speech.sayText(cmd.ack_line, 'ack');
 
-    // BRAIN chain: hold ONE follow-up for order_done. Nested thens are dropped.
-    if (cmd.then && this.state.robot.brain) {
-      this.pendingThen = { ...cmd.then, then: undefined };
+    // Hold the rest of the plan; each step fires as the previous order lands.
+    if (!fromPlan && cmd.plan && cmd.plan.length > 0) {
+      this.pendingPlan = [...cmd.plan];
+      logEvent('plan_set', { steps: this.pendingPlan.length });
     }
 
     // Ceremony is NOT a jail: driving around is allowed (elevator B stays dark
@@ -557,7 +914,11 @@ class Director {
           if (cmd.amount) {
             // Nudge: fixed distance, then the sim emits order_done + halts.
             // No line on completion — silence is fine, it did the thing.
-            this.setOrder({ kind: 'move', dir: cmd.dir, distancePx: cmd.amount === 'bit' ? 20 : 16 });
+            // "two steps right" is two tiles, not one: getting counts wrong is
+            // the exact thing that made the robot feel like it wasn't listening.
+            const steps = Math.max(1, Math.min(8, cmd.steps ?? 1));
+            const px = cmd.amount === 'bit' ? 20 : TILE * steps;
+            this.setOrder({ kind: 'move', dir: cmd.dir, distancePx: px });
             this.lastDid = `WENT ${cmd.dir.toUpperCase()} A BIT.`;
           } else {
             this.setOrder({ kind: 'move', dir: cmd.dir });
@@ -565,6 +926,11 @@ class Director {
           }
           this.saidWalkClaim = false;
         }
+        break;
+      case 'explore':
+        this.setOrder({ kind: 'explore' });
+        this.lastDid = 'WENT EXPLORING.';
+        this.awaitingFirstOrder = false;
         break;
       case 'stop':
         this.setOrder({ kind: 'stop' });
@@ -578,7 +944,14 @@ class Director {
       case 'pickup':
       case 'enter_elevator': {
         const targetId = cmd.target ?? (cmd.intent === 'enter_elevator' ? 'elevB' : undefined);
-        const target = targetId ? sim.entityById(this.state, targetId) : undefined;
+        let target = targetId ? sim.entityById(this.state, targetId) : undefined;
+        // Last-mile guard on the dead shaft. Elevator A is the one the robot
+        // rode IN on; it does nothing, and walking to it is always a wasted
+        // trip that reads as the robot being an idiot. Every parse path can
+        // produce it, so the invariant is enforced here as well as upstream.
+        if (target?.kind === 'elevatorA') {
+          target = sim.entityById(this.state, 'elevB') ?? undefined;
+        }
         if (!target || target.dead) break; // ack already voiced the confusion
         const kind =
           cmd.intent === 'goto'
@@ -616,41 +989,82 @@ class Director {
         }
         break;
       case 'hide':
-        // Pre-BRAIN the parser already turned this into a clarify; belt and
-        // braces — the ack spoke, but no order is set.
-        if (!this.state.robot.brain) break;
         this.setOrder({ kind: 'hide' });
         this.lastDid = 'HID.';
         break;
       case 'avoid': {
-        if (!this.state.robot.brain) break;
         const target = cmd.target ? sim.entityById(this.state, cmd.target) : null;
         if (!target || target.dead) break; // ack already voiced the confusion
-        // Standing order — no order change, the avoid-list rides along forever.
+        // Standing order — no order change, the avoid-list rides along.
         sim.addAvoid(this.state, target.id);
-        this.speech.sayBank('avoid_ok', 'bark');
+        this.ui.orders = standingLabels(this.state.robot.standing);
         break;
       }
+      case 'directive':
+        // The ack already said what changed; applyDirectives ran above.
+        this.lastDid = 'CHANGED ITS RULES.';
+        break;
       case 'clarify':
         if (this.ceremony) this.rereadCeremony(false);
         break;
+      case 'affirm':
+      case 'deny':
       case 'chatter':
         break;
     }
-    if (this.awaitingFirstOrder && ['move', 'stop', 'shoot', 'goto', 'attack'].includes(cmd.intent)) {
+    if (
+      this.awaitingFirstOrder &&
+      ['move', 'stop', 'shoot', 'goto', 'attack', 'explore', 'pickup', 'hide', 'avoid', 'directive', 'enter_elevator'].includes(
+        cmd.intent,
+      )
+    ) {
       this.awaitingFirstOrder = false;
     }
+
+    // A plan whose head left nothing running starts NOW. Briefs that open with
+    // a rule ("watch out for the cables, then take the lift") or with a target
+    // that turned out not to be there would otherwise sit in the queue waiting
+    // for an order_done that is never coming, and the player would watch the
+    // robot acknowledge the whole plan and then do none of it.
+    if (this.pendingPlan.length > 0 && this.state.robot.order === null) this.advancePlan();
   }
 
   private setOrder(order: Order): void {
     this.lastOrderKind = order.kind;
+    // Having something to do resets the give-up ladder: after finishing a real
+    // job it is allowed to ask what next properly again, rather than staying
+    // sulkily quiet because nobody answered it twenty minutes ago.
+    this.askStreak = 0;
+    this.nextIdleVoiceAt = 0;
     sim.setOrder(this.state, order);
   }
 
-  /** Void the BRAIN "then" chain — death, floor change, restart, ceremony, ending. */
+  /** Void the queued plan — death, floor change, restart, ceremony, ending. */
   private clearThenChain(): void {
-    this.pendingThen = null;
+    this.pendingPlan = [];
     this.lastOrderKind = null;
+    this.ui.plan = [];
+  }
+
+  /** Run the next step of the plan. Keeps the queue alive across the call. */
+  private advancePlan(): boolean {
+    const next = this.pendingPlan.shift();
+    if (!next) return false;
+    this.apply({ ...next }, true);
+    return true;
+  }
+
+  /** Short OSD labels for the queued steps ("2· FUSE", "3· LIFT"). */
+  private planLabels(): string[] {
+    return this.pendingPlan.map((s, i) => {
+      const ent = s.target ? sim.entityById(this.state, s.target) : null;
+      const what = ent
+        ? ent.label.split(' ').pop()!.toUpperCase()
+        : s.dir
+          ? s.dir.toUpperCase()
+          : s.intent.toUpperCase().replace('_', ' ');
+      return `${i + 2}·${what}`;
+    });
   }
 
   // ---------------------------------------------------------------- ceremonies
@@ -682,6 +1096,37 @@ class Director {
     this.speech.sayBank('crate_which', 'beat');
   }
 
+  /**
+   * The install beat, for EVERY module: chip off the floor, triad pick, EARS,
+   * BRAIN. Fullscreen icon + sparks, then the icon flies into the OSD strip and
+   * the glyph pops in its place at exactly the frame it lands.
+   *
+   * Freezing is not decoration: the reveal owns the whole feed for two seconds,
+   * and a machine that walked up while the player could not see the room is a
+   * hit they had no way to avoid.
+   */
+  private showUpgrade(id: ModuleId): void {
+    const info = MODULES[id];
+    this.ui.upgrade = { id, name: info.name, blurb: info.blurb };
+    this.audio.playSfx('powerup');
+    this.render.fx.shake(2, 320);
+    this.state.frozen = true;
+    const epoch = this.runEpoch;
+    const floor = this.state.floorIndex;
+    // Landed: the glyph appears in the corner as the flying icon reaches it.
+    setTimeout(() => {
+      if (this.runEpoch !== epoch) return;
+      if (!this.modules.includes(id)) this.modules.push(id);
+      this.ui.glyphs = [...this.modules];
+    }, UPGRADE_LAND_MS);
+    setTimeout(() => {
+      if (this.runEpoch !== epoch) return;
+      this.ui.upgrade = null;
+      // A floor change already unfroze the world — don't stomp on it.
+      if (this.state.floorIndex === floor && !this.ceremony) this.state.frozen = false;
+    }, UPGRADE_TOTAL_MS);
+  }
+
   private resolveCeremony(chip: ChipId): void {
     if (!this.ceremony) return;
     if (this.ceremony.floor !== this.state.floorIndex + 1) return; // stale ceremony
@@ -690,8 +1135,7 @@ class Director {
     this.ui.ceremonyOptions = null;
     sim.openCrate(this.state, 'crate_triad');
     sim.applyChip(this.state, chip);
-    this.ui.glyphs = [...this.state.robot.chips];
-    this.audio.playSfx('powerup');
+    this.showUpgrade(chip);
     if (chip === 'MEMORY' && this.playerGivenName && this.playerGivenName !== 'ROBOT') {
       const n = this.playerGivenName;
       this.state.robot.name = n;
@@ -699,37 +1143,51 @@ class Director {
     } else {
       this.speech.sayBank(CHIPS[chip].installLineId, 'beat');
     }
-    this.state.frozen = false;
+    // Still frozen: showUpgrade owns the thaw, at the end of the reveal.
     this.ui.phase = 'play';
     sim.powerElevatorB(this.state); // triad done — the way up lights on
     logEvent('ceremony_pick', { floor, chip });
   }
 
+  /**
+   * A chip picked up off the floor. Still NOT a ceremony — no card to read, no
+   * choice to make, you drove over a shiny thing and you are now different.
+   * What it does get is the install reveal, same as any other module: the thing
+   * you crossed a room for has to land somewhere the player can see it.
+   */
+  private onChipPickup(chip: ChipId): void {
+    if (!chip || !(chip in CHIPS)) return;
+    sim.applyChip(this.state, chip);
+    this.showUpgrade(chip);
+    this.lastDid = `ATE ${chip} CHIP.`;
+    if (chip === 'MEMORY' && this.playerGivenName && this.playerGivenName !== 'ROBOT') {
+      // The forgetting gag was told on arrival; this is its punchline.
+      const n = this.playerGivenName;
+      this.state.robot.name = n;
+      this.speech.sayText(`${n}! ROBOT REMEMBERS! ROBOT IS ${n}!`, 'ack');
+    } else {
+      this.speech.sayBank(CHIPS[chip].installLineId, 'ack');
+    }
+    logEvent('chip_pickup', { chip, floor: this.state.floorIndex + 1 });
+  }
+
   private earsCeremony(): void {
     this.clearThenChain();
-    this.state.frozen = true;
-    this.audio.playSfx('powerup');
-    this.state.robot.tier = 1;
+    sim.applyEars(this.state); // sharper senses: it notices things further off
+    sim.openCrate(this.state, 'crate_EARS');
+    this.showUpgrade('EARS'); // owns the freeze, the sfx and the thaw
     this.speech.sayBank('new_ears', 'beat', 400);
     this.speech.sayBank('say_thing', 'beat');
-    sim.openCrate(this.state, 'crate_EARS');
-    setTimeout(() => {
-      this.state.frozen = false;
-    }, 2500);
     logEvent('ears_tier1');
   }
 
   private brainCeremony(): void {
     this.clearThenChain();
-    this.state.frozen = true;
     sim.applyBrain(this.state);
-    this.audio.playSfx('powerup');
+    sim.openCrate(this.state, 'crate_BRAIN');
+    this.showUpgrade('BRAIN');
     this.speech.sayBank('new_brain', 'beat', 500);
     this.speech.sayBank('brain_hint', 'beat');
-    sim.openCrate(this.state, 'crate_BRAIN');
-    setTimeout(() => {
-      this.state.frozen = false;
-    }, 2500);
     logEvent('brain_installed');
   }
 
@@ -746,6 +1204,66 @@ class Director {
           this.speech.sayBank(pick(LINE_GROUPS.scrap), 'bark');
           this.lastDid = 'GOT SHINY.';
           break;
+        case 'chip_pickup':
+          this.onChipPickup(String(ev.data?.chip ?? '') as ChipId);
+          break;
+        case 'explore_found': {
+          const e = ev.id ? sim.entityById(this.state, ev.id) : null;
+          this.voice(
+            'found',
+            e ? `walked over to look at the ${e.label}` : 'wandered to an empty bit of floor',
+            { bank: 'idle_guard', minGapMs: 6000 },
+          );
+          break;
+        }
+        case 'self_order': {
+          // The robot decided something for itself — let it announce the plan
+          // in its own words. This is the beat that sells "it is playing too".
+          this.lastOrderKind = null; // the robot's plan replaced whatever we set
+          const what = String(ev.data?.what ?? '');
+          const label = String(ev.data?.label ?? 'something');
+          const detail =
+            what === 'fight'
+              ? `decided to take on the ${label}`
+              : what === 'retreat'
+                ? `decided to back away from the ${label}`
+                : what === 'gather'
+                  ? `decided to go grab the ${label}`
+                  : what === 'deliver'
+                    ? `decided to carry the fuse to the ${label}`
+                    : `decided to go look at the ${label}`;
+          this.lastDid = detail.replace('decided to ', '').toUpperCase();
+          this.voice('self_order', detail, { minGapMs: 7000 });
+          break;
+        }
+        case 'need_orders':
+          // Out of ideas. The ladder decides whether that is worth saying yet,
+          // and whether it is still a question at all.
+          this.idleVoice(performance.now());
+          break;
+        case 'path_failed': {
+          const e = ev.id ? sim.entityById(this.state, ev.id) : null;
+          this.voice('blocked', `cannot find any way to reach the ${e?.label ?? 'thing'}`, {
+            bank: 'wall_move',
+            minGapMs: 4000,
+          });
+          // A step it cannot do must not stall the whole brief — skip to the
+          // next one. The operator hears WHY, and the plan keeps moving.
+          this.advancePlan();
+          break;
+        }
+        case 'threat_seen': {
+          // The robot has seen something and is deliberately NOT charging it.
+          // Reporting and holding is the point: whether this is a fight is the
+          // operator's call, and making that call is the game.
+          const e = ev.id ? sim.entityById(this.state, ev.id) : null;
+          this.voice(
+            'enemy_spotted',
+            `has spotted a ${e?.label ?? 'machine'} about ${ev.data?.dist ?? '?'} away and is holding still, waiting to be told whether to fight it or go around`,
+            { priority: 'beat', bank: 'enemy_spot', minGapMs: 3000 },
+          );
+          break;
+        }
         case 'shot_fired':
           this.audio.playSfx('shoot');
           break;
@@ -764,19 +1282,30 @@ class Director {
             this.speech.sayBank('enemy_dead', 'bark');
           }
           break;
-        case 'enemy_spotted':
-          this.speech.sayBank('enemy_spot', 'bark');
+        case 'enemy_spotted': {
+          const e = ev.id ? sim.entityById(this.state, ev.id) : null;
+          const rule = this.state.robot.standing.avoidEnemies
+            ? ' and it has been told not to fight'
+            : '';
+          this.voice('enemy_spotted', `a ${e?.label ?? 'machine'} has noticed it${rule}`, {
+            bank: 'enemy_spot',
+            minGapMs: 4000,
+          });
           break;
+        }
         case 'robot_damage': {
           this.audio.playSfx(ev.data?.source === 'cable' ? 'zap' : 'hit');
           this.render.fx.glitchFrame();
           this.render.fx.shake(3, 250);
           const src = String(ev.data?.source ?? '');
-          if (src === 'cable') {
-            this.speech.sayBank(this.state.floorIndex === 1 ? 'floor_spicy' : 'floor_bit', 'bark');
-          } else {
-            this.speech.sayBank(pick(LINE_GROUPS.hurt), 'bark');
-          }
+          this.voice(
+            'hurt',
+            src === 'cable' ? 'drove over a sparking floor cable' : 'was hit by an angry machine',
+            {
+              bank: src === 'cable' ? 'floor_spicy' : pick(LINE_GROUPS.hurt),
+              minGapMs: 5000,
+            },
+          );
           if (this.state.robot.hp <= 2 && this.lowHpSaidFloor !== this.state.floorIndex) {
             this.lowHpSaidFloor = this.state.floorIndex;
             this.speech.sayBank('low_hp', 'bark');
@@ -810,14 +1339,25 @@ class Director {
           const reason = String(ev.data?.reason ?? '');
           if (reason === 'carrying') this.speech.sayBank('cant_shoot', 'bark');
           else if (reason === 'no_power') {
-            // Triad floors: the dark shaft means "crates first", not a fuse.
-            const line = TRIADS[this.state.floorIndex + 1] ? 'elev_dark' : 'fuse_need';
-            this.speech.sayBank(line, 'bark');
+            // ONE line either way. On a floor with a socket the blocker IS the
+            // fuse and saying so is the honest report; on a floor gated some
+            // other way, working out the route back is the operator's job and
+            // the robot only reports the door.
+            const hasSocket = this.state.entities.some((e) => e.kind === 'fuseSocket' && !e.dead);
+            this.speech.sayBank(hasSocket ? 'elev_no_fuse' : 'elev_other_way', 'bark');
+            // ...and it does not immediately start asking what to do about it.
+            this.quietFor(12000);
           }
           else if (reason === 'rage') this.speech.sayBank('refuse', 'bark');
+          else if (reason === 'rage_relent') this.speech.sayBank('rage_done', 'bark');
           else if (reason === 'tired') this.speech.sayBank('elev_tired', 'bark');
           else if (reason === 'wall') this.speech.sayBank('wall_move', 'bark');
           else if (reason === 'gone' || reason === 'cant_carry') this.speech.sayBank('refuse', 'bark');
+          // Anything that ended the order for good moves the plan along; a
+          // temporary refusal (RAGE) does not, because that order still runs.
+          if (reason === 'gone' || reason === 'cant_carry' || reason === 'wall' || reason === 'cant_hurt') {
+            this.advancePlan();
+          }
           break;
         }
         case 'chip_flee':
@@ -827,12 +1367,21 @@ class Director {
           // Sim nulls robot.order before emitting — the director's own record
           // is the only witness to WHAT finished.
           const wasHide = this.lastOrderKind === 'hide';
+          // selfDriven still describes the order that just ended (the sim nulls
+          // `order`, not the flag), so it is the honest test for whose idea it was.
+          const wasPlayerOrder = !this.state.robot.selfDriven && this.lastOrderKind !== null;
           this.lastOrderKind = null;
           if (wasHide) this.speech.sayBank('hide_done', 'bark');
-          if (this.pendingThen) {
-            const next = this.pendingThen;
-            this.pendingThen = null;
-            this.apply(next);
+          if (this.advancePlan()) break;
+          // A finished job the PLAYER asked for is a conversational opening:
+          // report, then ask. Self-chosen legs stay quiet — the robot narrating
+          // every step of its own tour would be exhausting.
+          if (wasPlayerOrder && !wasHide) {
+            const e = ev.id ? sim.entityById(this.state, ev.id) : null;
+            this.voice('arrived', e ? `finished the job at the ${e.label}` : 'finished the job', {
+              priority: 'idle',
+              minGapMs: 6000,
+            });
           }
           break;
         }
@@ -857,10 +1406,13 @@ class Director {
       this.cliffhanger();
       return;
     }
-    // A ceremony abandoned at the doors dies with its floor. So does a chain.
+    // A ceremony abandoned at the doors dies with its floor. So does a chain,
+    // and so does any question that was hanging in the air.
     this.clearThenChain();
+    this.clearQuestion();
     this.ceremony = null;
     this.ui.ceremonyOptions = null;
+    this.ui.upgrade = null;
     this.state.frozen = false;
     this.ui.phase = 'play';
     this.speech.clear();
@@ -872,18 +1424,29 @@ class Director {
     this.setOsd();
     const floor = this.state.floorIndex + 1;
     setTimeout(() => {
+      if (this.state.floorIndex + 1 !== floor || !this.simRunning()) return;
       if (floor === 2) {
         this.speech.sayBank('elev_tired', 'beat', 600);
         if (this.playerGivenName && this.playerGivenName !== 'ROBOT' && !this.state.robot.hasMemory) {
           this.speech.sayText(`WHO IS ${this.playerGivenName}? … OH. IS ROBOT.`, 'beat');
         }
       }
+      // Reads the new room out loud and offers a first move, so every floor
+      // opens on a conversation instead of on the player guessing.
+      const rules = standingLabels(this.state.robot.standing);
+      this.voice(
+        'floor_start',
+        `stepped out of the lift onto floor ${floor}${rules.length ? `, still under the rules: ${rules.join(', ')}` : ''}`,
+        { priority: 'beat', minGapMs: 0 },
+      );
     }, 900);
   }
 
   private onDeath(cause: string): void {
     this.runEpoch++;
     this.clearThenChain();
+    this.clearQuestion();
+    this.ui.upgrade = null; // a reveal does not outlive the robot holding it
     this.speech.clear();
     this.audio.playSfx('powerdown');
     this.render.fx.glitchFrame();
@@ -915,9 +1478,13 @@ class Director {
     if (this.ui.phase === 'boot') return;
     this.runEpoch++;
     this.clearThenChain();
+    this.clearQuestion();
     this.speech.clear();
     this.render.fx.deadCam(false);
     this.state = sim.initialState((Date.now() % 2147483647) | 0);
+    // The pile beat is a one-time opening, not a death penalty: a restart is
+    // back in control immediately (FIRST_MINUTES: <2s to control).
+    sim.wakeRobot(this.state);
     this.ceremony = null;
     this.ui.ceremonyOptions = null;
     this.awaitingName = false;
@@ -928,7 +1495,15 @@ class Director {
     this.lowHpSaidFloor = -1;
     this.lastDid = 'CAME BACK.';
     this.ui.deathCard = null;
+    this.modules = [];
     this.ui.glyphs = [];
+    this.ui.upgrade = null;
+    this.ui.orders = standingLabels(this.state.robot.standing);
+    this.ui.objective = '';
+    this.ui.plan = [];
+    this.ui.hp = this.state.robot.hp;
+    this.ui.maxHp = this.state.robot.maxHp;
+    this.ui.hpFlash = 0;
     this.ui.degrade = 0;
     this.ui.phase = 'play';
     this.setOsd();
@@ -945,6 +1520,7 @@ class Director {
     this.clearThenChain();
     this.speech.clear();
     this.ui.phase = 'cliffhanger';
+    this.ui.upgrade = null;
     this.ui.osd = 'CAM 06 · FLOOR 06 · NO SIGNAL';
     this.render.fx.deadCam(true);
     this.audio.playSfx('static_burst');
@@ -969,8 +1545,47 @@ class Director {
     this.ui.teletype = this.teletype.value;
     this.ui.teletypeActive = this.teletype.active || this.teletype.value.length > 0;
 
+    // Live input level — real RMS from the meter, so the VU and the help card's
+    // bar are evidence, not decoration.
+    const src = this.speechSource instanceof WebSpeechSource ? this.speechSource : null;
+    this.ui.micLevel = src?.level ?? 0;
+    if (this.ui.micHelp && now > this.micHelpUntil) this.dismissMicHelp();
+
     const r = this.state.robot;
     this.ui.moodGlyph = r.sulkTicks > 0 ? 'SULK' : r.mood === 'fleeing' ? 'FLEE' : '';
+    // The standing rules and the current job, on the feed. Without this the
+    // player has no evidence the robot kept what they told it, which is the
+    // whole point of it having a memory in the first place.
+    this.ui.orders = standingLabels(r.standing);
+    const busy = sim.describeOrder(this.state);
+    this.ui.objective = busy
+      ? `${r.selfDriven ? '·' : '»'} ${busy.toUpperCase()}`
+      : r.awaitingBriefing
+        ? '» AWAITING ORDERS'
+        : '';
+    this.ui.plan = this.planLabels();
+    this.ui.awaitingBriefing = r.awaitingBriefing;
+    if (this.pendingQuestion && now > this.questionUntil) this.clearQuestion();
+
+    // Hull readout. hpFlash punches on every point lost so damage is felt on
+    // the OSD, not just in the caption.
+    if (r.hp < this.ui.hp) this.ui.hpFlash = 1;
+    this.ui.hpFlash = Math.max(0, this.ui.hpFlash - dtMs / 330);
+    this.ui.hp = r.hp;
+    this.ui.maxHp = r.maxHp;
+
+    // ---- pre-wake: the heap is alive, and it is the only thing on screen ----
+    if (r.dormant) {
+      this.ui.pileStir = Math.max(0, this.ui.pileStir - dtMs / 550);
+      if (this.ui.phase === 'play' && now - this.lastStirAt > STIR_EVERY_MS) {
+        // Something in there twitches on a slow clock. No voice, no captions —
+        // the player has to decide, on their own, to talk to a pile of junk.
+        this.stir();
+        this.lastStirAt = now + (uiRng() * 1800 - 400);
+      }
+      return;
+    }
+    this.ui.pileStir = Math.max(0, this.ui.pileStir - dtMs / 400);
 
     if (this.simRunning() && r.alive) {
       const hostile = sim.nearestHostile(this.state);
@@ -1020,14 +1635,11 @@ class Director {
           const threshold = this.awaitingFirstOrder ? 25000 : 40000;
           if (silence > threshold) {
             this.lastIdleAt = now;
-            // BRAIN widens the idle pool with suggestion barks (merge here —
-            // LINE_GROUPS is shared and stays untouched).
-            const pool: readonly string[] = this.state.robot.brain
-              ? [...LINE_GROUPS.idle, 'idle_ideas', 'idle_tactics']
-              : LINE_GROUPS.idle;
-            const line = pick(pool);
-            if (line === 'idle_spin') this.audio.playSfx('spin');
-            this.speech.sayBank(line, 'idle');
+            // Same ladder as running out of jobs, and the same randomised
+            // clock: there is only ever ONE reason the robot is making noise
+            // into a silent room, and it should escalate and thin out the same
+            // way whichever end it came from.
+            this.idleVoice(now);
           }
         }
       }

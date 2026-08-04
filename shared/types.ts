@@ -28,12 +28,28 @@ export const TICK_MS = 1000 / TICK_HZ;
 
 export type ChipId = 'MAGNET' | 'RAGE' | 'SCARED' | 'MEMORY' | 'ZAP' | 'TOUGH';
 
-/** EARS comprehension tier. Teaser uses 0 (RC tank) and 1 (named targets). */
-export type EarsTier = 0 | 1;
+/**
+ * Anything the robot can have INSTALLED, and therefore anything that owns a
+ * glyph on the OSD module strip: the personality chips plus the two crate
+ * upgrades. EARS/BRAIN are not chips — they carry no stat block — but to the
+ * player they are the same thing ("I got a new part"), and a box you cross a
+ * floor for that leaves no mark on the HUD reads as a box that did nothing.
+ */
+export type ModuleId = ChipId | 'EARS' | 'BRAIN';
+
+/**
+ * Hearing acuity. 1 is the FLOOR, not the ceiling: the robot understands named
+ * targets from its first second awake (withholding vocabulary read as a broken
+ * game, not as progression). 0 survives only for tooling/tests; 2 is the
+ * floor-3 EARS crate — longer sight, unprompted callouts on what it notices.
+ */
+export type EarsTier = 0 | 1 | 2;
 
 export type EntityKind =
   | 'scrap' // pickup, +1 scrap
+  | 'chip' // loose personality chip lying on the floor; `option` holds ChipId
   | 'crate' // triad crate on pedestal; `option` holds ChipId
+  | 'debris' // heap of dead machines (the opening pile); decorative, non-blocking
   | 'cable' // sparking floor cable hazard (zone damage, telegraphed sparks)
   | 'fusedPrinter' // enemy: printer melted onto a vacuum, chases + spits paper
   | 'printerInnocent' // harmless decoy printer (wrong-target comedy)
@@ -49,7 +65,7 @@ export interface Entity {
   pos: Vec; // center, px
   hp?: number;
   maxHp?: number;
-  /** ChipId for crates. */
+  /** ChipId for crates and loose floor chips. */
   option?: ChipId;
   /** Human-ish label given to the parser ("the angry crate", "printer"). */
   label: string;
@@ -72,16 +88,93 @@ export interface Projectile {
 
 // ---------------------------------------------------------------- robot & orders
 
-/** Standing order the behavior tree executes. Set by the director from parsed commands. */
+/** The task the robot is executing right now. Set by the director from parsed
+ *  commands, or by the sim itself when it acts on its own (see selfDriven). */
 export type Order =
-  | { kind: 'move'; dir: Dir; distancePx?: number } // tier 0: until wall/stop; distancePx = nudge ("a bit", "one step") then order_done
+  | { kind: 'move'; dir: Dir; distancePx?: number } // until wall/stop; distancePx = nudge ("a bit", "one step") then order_done
   | { kind: 'stop' }
   | { kind: 'shoot' } // fire at nearest hostile in facing cone, else straight ahead
-  | { kind: 'goto'; targetId: string; careful?: boolean } // tier 1 straight-line; careful (BRAIN) = slow + wide berth around hostiles/hazards
+  | { kind: 'goto'; targetId: string; careful?: boolean } // careful = slow + wide berth around hostiles/hazards
   | { kind: 'attack'; targetId: string }
   | { kind: 'pickup'; targetId: string; careful?: boolean }
   | { kind: 'enter'; targetId: string }
-  | { kind: 'hide' }; // BRAIN: find cover breaking line-of-sight to nearest hostile, go there
+  | { kind: 'explore' } // standing order: tour the floor, visiting interesting things one by one
+  | { kind: 'hide' } // find cover breaking line-of-sight to nearest hostile, go there
+  | { kind: 'retreat' }; // back off from the nearest hostile until it is out of sight
+
+/**
+ * A persistent behaviour switch the player sets by talking ("avoid the
+ * machines", "don't pick anything up", "fight everything"). Directives are the
+ * robot's MEMORY of how this floor should be played: they survive order
+ * changes, arrivals and completions, and are what makes "go to the elevator and
+ * avoid enemies" one instruction rather than two forgotten halves.
+ */
+export type DirectiveKind =
+  | 'avoid_enemies' // route wide around hostiles, never pick a fight
+  | 'fight_enemies' // engage hostiles on sight (clears avoid_enemies)
+  | 'avoid_hazards' // route wide around cables
+  | 'ignore_hazards'
+  | 'gather' // grab scrap/chips noticed on the way
+  | 'no_gather'
+  | 'careful' // move slow + quiet by default
+  | 'bold'
+  | 'act_alone' // go off and explore the floor unprompted, not just react
+  | 'wait_for_orders'; // stand still when idle, do nothing unasked
+
+/** Resolved standing orders. Lives on RobotState; the sim reads it every tick. */
+export interface Standing {
+  avoidEnemies: boolean;
+  /** Shoot back at a machine already coming for us. Self-defence, not a plan. */
+  fight: boolean;
+  /** Go LOOKING for a fight. Off by default: charging across the room at a
+   *  machine nobody mentioned is the "guns blazing" problem, and it is the
+   *  operator's call, not the robot's. Set by "fight everything". */
+  hunt: boolean;
+  avoidHazards: boolean;
+  gather: boolean;
+  careful: boolean;
+  /** React on its own — finish deliveries, fight or back off, grab loot
+   *  underfoot, and ask when it runs dry. Does NOT include wandering off. */
+  autonomy: boolean;
+  /** Go looking for things nobody asked about. Off by default: a companion
+   *  that wanders off mid-sentence stops feeling like it is with you. The
+   *  player turns it on by saying so ("do your own thing"). */
+  roam: boolean;
+  /** Specific entity ids to route wide around ("avoid THAT printer"). */
+  avoidIds: string[];
+}
+
+export function defaultStanding(): Standing {
+  return {
+    avoidEnemies: false,
+    fight: true,
+    hunt: false,
+    // Off by default. Routing around every spark is technically smarter and
+    // much less fun — driving onto the spicy floor is a joke the robot is
+    // supposed to be able to make. The player can ask for care.
+    avoidHazards: false,
+    gather: true,
+    careful: false,
+    autonomy: true,
+    roam: false,
+    avoidIds: [],
+  };
+}
+
+/** Short OSD labels for the directives currently in force (memory made visible). */
+export function standingLabels(s: Standing): string[] {
+  const out: string[] = [];
+  if (s.avoidEnemies) out.push('AVOID FOES');
+  else if (!s.fight) out.push('NO FIGHT');
+  else if (s.hunt) out.push('HUNTING');
+  if (s.careful) out.push('SNEAK');
+  if (s.avoidHazards) out.push('MIND CABLES');
+  if (!s.gather) out.push('NO LOOT');
+  if (s.roam) out.push('ROAMING');
+  if (!s.autonomy) out.push('ON LEASH');
+  if (s.avoidIds.length > 0) out.push(`AVOID ×${s.avoidIds.length}`);
+  return out;
+}
 
 export interface RobotState {
   pos: Vec;
@@ -93,17 +186,33 @@ export interface RobotState {
   hp: number;
   maxHp: number;
   alive: boolean;
+  /** Asleep inside the opening debris pile: ignores orders, renders as a glint.
+   *  Cleared once — by `wakeRobot`, on the player's first real utterance. */
+  dormant: boolean;
   tier: EarsTier;
   chips: ChipId[];
   /** Voice-given name; null until the naming beat. Forgotten (reset to null) on floor change until MEMORY. */
   name: string | null;
   /** True once the MEMORY chip is installed — name persists, gag stops. */
   hasMemory: boolean;
-  /** BRAIN upgrade (floor 4 crate): smart execution — hide/avoid/careful/then-chains. */
+  /** Kept for the parser contract; TRUE from the first second — every phrase
+   *  the player can say (hide, avoid, sneak, then-chains) works immediately. */
   brain: boolean;
-  /** Standing avoid-list (BRAIN): entity ids the robot routes wide around, persistently. */
-  avoidIds: string[];
+  /** BRAIN crate (floor 4): the robot volunteers PLANS unprompted and holds
+   *  longer chains. It could always execute; now it has opinions about what next. */
+  ideas: boolean;
+  /** Standing orders — the robot's memory of how to play this floor. */
+  standing: Standing;
   order: Order | null;
+  /** True when the CURRENT order was chosen by the robot itself, not the player. */
+  selfDriven: boolean;
+  /**
+   * The robot has just arrived somewhere new and is HOLDING for instructions.
+   * Nothing self-directed runs while this is set — it reports what it can see
+   * and waits. Cleared by the first real order of the floor. Every floor is
+   * supposed to open on "what do we do?", not on the robot already gone.
+   */
+  awaitingBriefing: boolean;
   /** 'ok' | 'sulk' (ignores orders ~3s) | 'fleeing' (SCARED). */
   mood: 'ok' | 'sulk' | 'fleeing';
   /** Ticks remaining of sulk. */
@@ -127,6 +236,8 @@ export type SimEventType =
   | 'order_done' // goto/attack/pickup finished
   | 'order_blocked' // can't comply (e.g. shoot while carrying)
   | 'scrap_pickup'
+  | 'chip_pickup' // loose floor chip collected — { chip: ChipId }
+  | 'explore_found' // explore order reached a point of interest — id = entity, or none for a wander leg
   | 'robot_damage' // { source: 'cable' | 'paper' | 'enemy' }
   | 'robot_death' // { cause: string }
   | 'enemy_hit'
@@ -139,7 +250,11 @@ export type SimEventType =
   | 'elevator_entered' // floor complete
   | 'enemy_spotted' // first time a hostile is within robot sight
   | 'chip_flee' // SCARED kicked in
-  | 'chip_detour'; // MAGNET detoured to scrap
+  | 'chip_detour' // MAGNET detoured to scrap
+  | 'self_order' // robot chose its own next task — { what, label }
+  | 'need_orders' // robot is idle and out of ideas: it wants to be told something
+  | 'threat_seen' // spotted a hostile and is HOLDING for instructions, not charging
+  | 'path_failed'; // no route exists to the ordered target
 
 export interface SimEvent {
   type: SimEventType;
@@ -168,32 +283,58 @@ export interface SimState {
 
 // ---------------------------------------------------------------- parser (LLM) contract
 
-/** Tier-gated command intents + meta intents. */
+/** Command intents + meta intents. Nothing here is gated behind an upgrade. */
 export type IntentType =
   | 'move' // dir required
   | 'stop'
   | 'shoot'
-  | 'goto' // tier 1+, target required
-  | 'attack' // tier 1+
-  | 'pickup' // tier 1+
+  | 'goto' // target required
+  | 'attack'
+  | 'pickup'
   | 'enter_elevator'
+  | 'explore' // "go explore" / "look around" — standing wander order
   | 'name_robot' // naming beat; `name` holds the name
   | 'choose' // triad; `choice` holds ChipId
-  | 'hide' // BRAIN: take cover from the nearest hostile
-  | 'avoid' // BRAIN: standing order — route wide around `target` from now on
+  | 'hide' // take cover from the nearest hostile
+  | 'avoid' // standing order — route wide around `target` from now on
+  | 'directive' // pure standing-order change, no movement ("stop picking things up")
+  | 'affirm' // "yes" / "do it" — answers the robot's own pending question
+  | 'deny' // "no" / "not that"
   | 'robot_choice' // player indifferent — robot picks (director rolls)
   | 'clarify' // parser unsure — ack_line IS the in-character ask-again
   | 'chatter'; // not a command; ack_line is the in-character reply
 
+/** One queued step of a plan. Commands only — no meta intents, no nesting. */
+export interface PlanStep {
+  intent: IntentType;
+  dir?: Dir;
+  amount?: 'bit' | 'step';
+  steps?: number;
+  careful?: boolean;
+  target?: string;
+  /** What the robot says as it STARTS this step. */
+  ack_line: string;
+}
+
 export interface ParsedCommand {
   intent: IntentType;
   dir?: Dir;
-  /** Movement magnitude: 'bit' ≈ 20px, 'step' ≈ 16px, omitted = until wall/stop. */
+  /** Movement magnitude: 'bit' ≈ 20px, 'step' ≈ one tile, omitted = until wall/stop. */
   amount?: 'bit' | 'step';
-  /** BRAIN: cautious execution ("sneak to X") — slow + wide berth. */
+  /** Step count when the player asked for several ("two steps right"). 1..8, only with amount 'step'. */
+  steps?: number;
+  /** Cautious execution ("sneak to X") — slow + wide berth, this order only. */
   careful?: boolean;
-  /** BRAIN: one chained follow-up ("grab the fuse THEN hide") — runs on order_done. */
-  then?: ParsedCommand;
+  /**
+   * The REST of a multi-step plan, in order, after this command. "Grab the
+   * fuse, put it in the socket, then take the lift" is one utterance and one
+   * plan: the robot executes the head immediately and holds the tail, stepping
+   * through it as each order completes. Max 4 held steps.
+   */
+  plan?: PlanStep[];
+  /** Standing-order changes carried by this utterance. May ride ALONG with a
+   *  command: "go to the elevator and avoid enemies" is one goto + one directive. */
+  directives?: DirectiveKind[];
   /** Entity id from ParseRequest.entities. */
   target?: string;
   choice?: ChipId;
@@ -217,6 +358,10 @@ export interface ParseEntity {
 
 export interface ParseRequest {
   utterance: string;
+  /** Runner-up STT hypotheses for the SAME audio, best-first, excluding
+   *  `utterance`. Browser speech recognition mangles homophones ("go to steps
+   *  right" for "go two steps right") — the model reconciles them. */
+  alternatives: string[];
   tier: EarsTier;
   floor: number; // 1-based, for flavor
   robotName: string | null;
@@ -226,18 +371,79 @@ export interface ParseRequest {
   options: ChipId[] | null;
   /** Awaiting the naming answer? */
   awaitingName: boolean;
-  /** BRAIN installed — hide/avoid/careful/then vocabulary live. */
+  /** Always true in play — kept in the contract so the schema stays stable. */
   brain: boolean;
   /** Visible entities the robot could target. */
   entities: ParseEntity[];
-  /** Last few robot lines, for conversational context. */
+  /** Rolling dialogue log, oldest first: "VOICE: …" / "ROBOT: …". */
   recent: string[];
   shouted: boolean;
+  /** Standing orders in force — so the model can answer "what are you doing?"
+   *  and can tell a NEW directive from one already running. */
+  standing: Standing;
+  /** The question the robot itself last asked, awaiting an answer. A bare
+   *  "yes"/"go on"/"nah" is meaningless without it. Null when none is open. */
+  pendingQuestion: string | null;
+  /** What the robot is doing this second, in words ("going to the elevator"). */
+  busy: string | null;
+  hp: number;
+  maxHp: number;
+  /** Hands full (carrying the fuse) — no shooting, and it knows it. */
+  carrying: boolean;
+}
+
+// ---------------------------------------------------------------- robot voice (unprompted)
+
+/**
+ * Why the robot is opening its mouth without being spoken to. This is the
+ * channel that stops the robot sounding like a jukebox of pre-written lines:
+ * the situation goes to the model, the model writes the sentence.
+ */
+export type SayTrigger =
+  | 'floor_start' // just arrived on a new floor — reads the room, proposes a plan
+  | 'self_order' // chose its own next task, announces it
+  | 'found' // reached something interesting on its tour
+  | 'enemy_spotted'
+  | 'hurt'
+  | 'blocked' // couldn't do the thing (no route, no power, hands full)
+  | 'idle_ask' // out of ideas: asks the operator what to do
+  | 'arrived' // finished the ordered task, wants the next one
+  | 'banter'; // long silence, nothing happening — says something anyway
+
+export interface SayRequest {
+  trigger: SayTrigger;
+  /** One plain-English fact about what just happened, written by the director. */
+  detail: string;
+  floor: number;
+  robotName: string | null;
+  personality: ChipId[];
+  standing: Standing;
+  /** BRAIN crate installed — the robot may volunteer a concrete proposal. */
+  ideas: boolean;
+  hp: number;
+  maxHp: number;
+  carrying: boolean;
+  entities: ParseEntity[];
+  recent: string[];
+}
+
+/**
+ * The robot's unprompted line, plus (optionally) something it wants to DO. The
+ * proposal is never executed on its own — it waits for the operator to agree,
+ * which is what keeps the engine, not the model, in charge of the world.
+ */
+export interface SayResponse {
+  line: string;
+  /** True when `line` ends on a question the operator is expected to answer. */
+  question?: boolean;
+  proposal?: { intent: IntentType; target?: string; dir?: Dir } | null;
+  source?: 'llm' | 'local';
 }
 
 // ---------------------------------------------------------------- server API
 
 /** POST /api/parse : ParseRequest -> ParsedCommand (400/500 -> client falls back to local parser) */
+/** POST /api/say : SayRequest -> SayResponse (any failure -> client uses a bank line) */
 /** POST /api/tts : TtsRequest -> audio/mpeg bytes */
 export interface TtsRequest {
   text: string;
@@ -280,6 +486,19 @@ export type GamePhase =
   | 'cliffhanger' // CAM 06 dead static + voice
   | 'title'; // ROBOT OPERATOR + TO BE CONTINUED
 
+/** Why the mic produced nothing, and what the player can do about it. */
+export type MicFault =
+  | 'unsupported' // no SpeechRecognition in this browser
+  | 'denied' // permission refused / blocked
+  | 'silent' // permission fine, but zero audio energy reached us — wrong input device
+  | 'noWords'; // audio arrived, recognition returned no words (accent/noise/language)
+
+export interface MicHelp {
+  fault: MicFault;
+  title: string;
+  steps: string[];
+}
+
 export interface DeathCard {
   robotName: string;
   floor: number;
@@ -289,12 +508,32 @@ export interface DeathCard {
   scrap: number;
 }
 
+/**
+ * The install moment, fullscreen. Set by the director the instant a module goes
+ * in and cleared when the beat is over; render restarts the animation whenever
+ * the OBJECT identity changes, so re-installing the same id still plays.
+ */
+export interface UpgradeReveal {
+  id: ModuleId;
+  /** Big word under the icon ("BRAIN"). */
+  name: string;
+  /** One short line of what it does. */
+  blurb: string;
+}
+
+/** When the flying icon touches down in the OSD module strip. The director adds
+ *  the glyph at exactly this moment, so the strip pops as the icon lands —
+ *  which is the whole trick that ties "I got a thing" to "it is up there now". */
+export const UPGRADE_LAND_MS = 2100;
+/** When the reveal is over and `UiState.upgrade` goes back to null. */
+export const UPGRADE_TOTAL_MS = 2400;
+
 export interface UiState {
   phase: GamePhase;
   /** OSD top-left, e.g. "CAM 03 · FLOOR 03 · REC ●". */
   osd: string;
   /** Installed module glyphs for the OSD strip. */
-  glyphs: ChipId[];
+  glyphs: ModuleId[];
   /** Current spoken caption (robot line) or ''. */
   caption: string;
   /** Player push-to-talk held. */
@@ -308,14 +547,36 @@ export interface UiState {
   stickyNote: boolean;
   /** "HOLD [SPACE] TO TALK" onboarding hint — director sets ~3s after boot until first PTT. */
   talkHint: boolean;
+  /** Mic troubleshooting card, or null. Shown when a press yields no words. */
+  micHelp: MicHelp | null;
+  /** Live input level 0..1 while listening — drives the real VU meter, and is
+   *  the player's proof the mic works before the robot has ever answered. */
+  micLevel: number;
+  /** Pulses 1→0 when the sleeping robot stirs inside the pile (pre-wake theatre). */
+  pileStir: number;
   deathCard: DeathCard | null;
   /** Triad options panel (single shiny crate opened): render as an on-feed CRT
    *  card — glyph, spoken name, one-line blurb each. Voice-only selection. */
   ceremonyOptions: Array<{ id: ChipId; name: string; blurb: string }> | null;
+  /** Fullscreen install ceremony (chip eaten, crate opened), or null. */
+  upgrade: UpgradeReveal | null;
   /** Robot head should aim at camera (ack tell), decays in render. */
   headToCameraMs: number;
   /** Mood glyph on OSD: '' | 'SULK' | 'FLEE'. */
   moodGlyph: string;
+  /** Standing-order chips on the OSD — the player's proof the robot remembered. */
+  orders: string[];
+  /** What the robot is doing right now, OSD second row ("→ ELEVATOR"). */
+  objective: string;
+  /** Queued plan steps still to come, in order, as short labels. */
+  plan: string[];
+  /** Robot condition, for the OSD hull bar. */
+  hp: number;
+  maxHp: number;
+  /** Pulses 1→0 when hp drops, so the bar can flash the hit. */
+  hpFlash: number;
+  /** True while the robot is holding at a floor entrance waiting to be briefed. */
+  awaitingBriefing: boolean;
   /** 0..1 how close danger is (drives CRT jitter). */
   danger: number;
   /** 0..1 feed degradation (robot HP worry). */

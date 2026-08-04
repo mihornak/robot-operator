@@ -124,7 +124,7 @@ export function createRenderApp(art: ArtAtlas): RenderApp {
     crt.setGlow(
       world.robot.container.x + f.ox,
       world.robot.container.y + f.oy,
-      view.sim.robot.alive,
+      view.sim.robot.alive && !view.sim.robot.dormant,
     );
 
     if (!f.skip) app.render();

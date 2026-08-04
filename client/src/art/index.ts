@@ -24,8 +24,10 @@ import {
 } from './enemies';
 import {
   drawCable,
+  drawChipItem,
   drawCrate,
   drawCrateTriad,
+  drawDebrisPile,
   drawElevator,
   drawFuse,
   drawFuseSocket,
@@ -55,6 +57,8 @@ const DRAWERS: Record<ArtName, Drawer> = {
   printer_innocent: drawPrinterInnocent,
   mop: drawMop,
   scrap: drawScrap,
+  debris_pile: drawDebrisPile,
+  chip_item: drawChipItem,
   crate: drawCrate,
   crate_triad: drawCrateTriad,
   pedestal: drawPedestal,
@@ -78,6 +82,8 @@ const DRAWERS: Record<ArtName, Drawer> = {
   glyph_MEMORY: glyphDrawer('MEMORY'),
   glyph_ZAP: glyphDrawer('ZAP'),
   glyph_TOUGH: glyphDrawer('TOUGH'),
+  glyph_EARS: glyphDrawer('EARS'),
+  glyph_BRAIN: glyphDrawer('BRAIN'),
 };
 
 function drawFrame(name: ArtName, frame: number): HTMLCanvasElement {

@@ -1,9 +1,11 @@
 /** Thin API client. Every call fail-softs — the game must run with the server down. */
 
-import type { LogBatch, ParseRequest, ParsedCommand } from '@shared/types';
+import type { LogBatch, ParseRequest, ParsedCommand, SayRequest, SayResponse } from '@shared/types';
 
 const PARSE_TIMEOUT_MS = 2500; // ack contract: ≤1.5s target, hard stop at 2.5
 const TTS_TIMEOUT_MS = 3500;
+/** Unprompted speech is ambient — it may never make the game wait. */
+const SAY_TIMEOUT_MS = 3000;
 
 async function withTimeout<T>(ms: number, fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
   const ctrl = new AbortController();
@@ -26,6 +28,20 @@ export async function apiParse(req: ParseRequest): Promise<ParsedCommand> {
     });
     if (!res.ok) throw new Error(`parse ${res.status}`);
     return (await res.json()) as ParsedCommand;
+  });
+}
+
+/** The robot's unprompted line for a world event. Throws — caller uses the bank. */
+export async function apiSay(req: SayRequest): Promise<SayResponse> {
+  return withTimeout(SAY_TIMEOUT_MS, async (signal) => {
+    const res = await fetch('./api/say', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (!res.ok) throw new Error(`say ${res.status}`);
+    return (await res.json()) as SayResponse;
   });
 }
 
