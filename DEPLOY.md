@@ -29,6 +29,25 @@ audio. Keys buy fidelity, not access. Deploy first, add keys later.
 
 ## 1. Create the project from the GitHub repo
 
+> **Railway will probably split this into two services, and you have to undo
+> that.** On import it detects the pnpm workspace and stages one service per
+> deployable package — you get a `client` tile and a `server` tile. That is the
+> wrong shape here: this is a single service, the Node server serves
+> `client/dist` from its own origin. Worse, a monorepo import looks for config
+> at the root of each *package* directory, so the `railway.json` at the repo
+> root is ignored and the `server` tile is left running `pnpm --filter server
+> build` — a script that does not exist — and never builds the client at all.
+> You would deploy an API with no game attached.
+>
+> Fix it before doing anything else: delete the `client` tile
+> (**Settings** → **Remove Service**), then on the `server` tile set
+> **Config as code** to `/railway.json`, clear the auto-set **Watch Paths** of
+> `/server/**` (otherwise client-only changes never trigger a redeploy), and
+> confirm **Root Directory** is the repo root. If the config path gives you
+> trouble, override **Build Command** to `pnpm run build` and **Start Command**
+> to `pnpm run start` instead — same result. The boot line in the deploy logs
+> must end `static=true`; `static=false` means the client build did not run.
+
 1. Go to <https://railway.com/new>.
 2. Choose **Deploy from GitHub repo**.
 3. If this is your first Railway project, you will be asked to install the
@@ -146,6 +165,27 @@ the UI or API. Note the trade-off before you do it: sealing is irreversible,
 and sealed variables are not copied into PR environments or duplicated
 services.
 
+### ADMIN_TOKEN — for the analytics dashboard
+
+The `/admin` dashboard and the `/api/admin/*` routes behind it are gated by one
+shared secret. Generate it with `openssl rand -hex 32` and add it:
+
+```
+ADMIN_TOKEN = <64 hex characters>
+```
+
+Without it the entire admin surface answers **501** and the dashboard stays
+off. That is deliberate — a deploy that forgets this variable cannot leave your
+funnel and your captured email addresses readable by anyone who guesses the
+URL. With the token set but no `DATABASE_URL`, the routes answer **503** so the
+page can say "no database" rather than rendering zeroes that look like real
+data.
+
+This is the password to every email address you have captured, so it deserves
+the **Seal** treatment described above once you have confirmed it works. To log
+in, open `/admin` and paste the token; it is held in `sessionStorage` only and
+dies with the tab.
+
 ### Do NOT set PORT
 
 Railway injects `PORT` itself, and it uses that same value when running the
@@ -205,6 +245,20 @@ Read it like a checklist:
 - `db` — `true` when `DATABASE_URL` is set. `false` means wishlist signups go
   to ephemeral disk. If you added Postgres and this is `false`, your reference
   variable did not resolve — check the service name in `${{Postgres.DATABASE_URL}}`.
+
+**The analytics dashboard**, if you set `ADMIN_TOKEN`:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' https://<your-domain>/api/admin/overview
+```
+
+Expect `401` — no bearer header. A `501` means `ADMIN_TOKEN` never took; a
+`503` means the routes are up but `DATABASE_URL` is missing. Then open
+`https://<your-domain>/admin` in a browser and paste the token.
+
+Note the dashboard starts empty even on a working deploy: it only sees events
+recorded after the `events` table exists, and anything logged before this
+feature shipped went to ephemeral disk that is already gone.
 
 **The game itself:**
 
