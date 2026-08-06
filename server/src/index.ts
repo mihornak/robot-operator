@@ -15,8 +15,9 @@ import { z } from 'zod';
 import type { ParseRequest, SayRequest } from '../../shared/types';
 import { parseUtterance } from './parse';
 import { sayLine } from './say';
-import { parseRequestSchema, sayRequestSchema } from './schema';
+import { parseRequestSchema, sayRequestSchema, wishlistRequestSchema } from './schema';
 import { synthesize } from './tts';
+import { maskEmail, saveWishlist } from './wishlist';
 
 const SERVER_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
 const LOGS_DIR = join(SERVER_DIR, 'logs');
@@ -29,6 +30,7 @@ app.get('/api/health', (c) =>
     ok: true,
     llm: Boolean(process.env.OPENROUTER_API_KEY),
     tts: Boolean(process.env.ELEVENLABS_API_KEY),
+    db: Boolean(process.env.DATABASE_URL),
   }),
 );
 
@@ -83,6 +85,26 @@ app.post('/api/tts', async (c) => {
   c.header('Cache-Control', 'no-store');
   c.header('X-Tts-Cache', result.cached ? 'hit' : 'miss');
   return c.body(result.audio);
+});
+
+/** The email gate. 400 only for a body that is not an email — everything after
+ *  that is best-effort, because a player is standing in front of this waiting
+ *  to play again and a broken database is not their problem. */
+app.post('/api/wishlist', async (c) => {
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'invalid json' }, 400);
+  }
+  const parsed = wishlistRequestSchema.safeParse(body);
+  if (!parsed.success) return c.json({ error: 'bad WishlistRequest' }, 400);
+  const t0 = Date.now();
+  const out = await saveWishlist(parsed.data, c.req.header('user-agent'));
+  console.log(
+    `[wishlist] ${maskEmail(parsed.data.email)} stored=${out.stored} already=${out.already} floor=${parsed.data.floor ?? '-'} ${Date.now() - t0}ms`,
+  );
+  return c.json(out);
 });
 
 /** Loose LogBatch mirror — event items unchecked, count capped. */

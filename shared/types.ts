@@ -35,7 +35,7 @@ export type ChipId = 'MAGNET' | 'RAGE' | 'SCARED' | 'MEMORY' | 'ZAP' | 'TOUGH';
  * player they are the same thing ("I got a new part"), and a box you cross a
  * floor for that leaves no mark on the HUD reads as a box that did nothing.
  */
-export type ModuleId = ChipId | 'EARS' | 'BRAIN';
+export type ModuleId = ChipId | 'EARS' | 'BRAIN' | 'ROCKET';
 
 /**
  * Hearing acuity. 1 is the FLOOR, not the ceiling: the robot understands named
@@ -52,8 +52,10 @@ export type EntityKind =
   | 'debris' // heap of dead machines (the opening pile); decorative, non-blocking
   | 'cable' // sparking floor cable hazard (zone damage, telegraphed sparks)
   | 'fusedPrinter' // enemy: printer melted onto a vacuum, chases + spits paper
+  | 'fusedShredder' // BOSS (floor 6): bigger body, lobs arcing mortars
   | 'printerInnocent' // harmless decoy printer (wrong-target comedy)
   | 'mop' // harmless prop, wrong-target comedy
+  | 'chair' // office chair; harmless furniture, wrong-target comedy
   | 'fuse' // fragile carryable; carrying disables weapon
   | 'fuseSocket' // where the fuse goes (floor 4, powers elevator B)
   | 'elevatorA' // spawn elevator (behind robot, inert)
@@ -69,7 +71,12 @@ export interface Entity {
   option?: ChipId;
   /** Human-ish label given to the parser ("the angry crate", "printer"). */
   label: string;
-  /** Generic per-kind state machine tag (render may map to frames). */
+  /**
+   * Generic per-kind state machine tag (render may map to frames).
+   * 'dormant' is reserved across every hostile kind: a machine that has not
+   * been woken is SCENERY — not a threat, not a target, not something to route
+   * around (see isLiveHostile / wakeMachine in sim/internal.ts).
+   */
   state?: string;
   /** Facing for enemies. */
   facing?: Dir;
@@ -81,9 +88,40 @@ export interface Entity {
 
 export interface Projectile {
   id: string;
-  kind: 'bolt' | 'paper'; // robot bolt | enemy crumpled paper
+  /**
+   * robot bolt | enemy crumpled paper | robot rocket (explodes on impact) |
+   * `shell` — the boss's arcing mortar round. `shell` is PURE DECORATION: it
+   * flies over the walls, collides with nothing, and does no damage. The
+   * damage lives entirely in the Mortar record it was launched alongside, so
+   * the telegraph timing is exact by construction rather than by simulation.
+   */
+  kind: 'bolt' | 'paper' | 'rocket' | 'shell';
   pos: Vec;
   vel: Vec;
+}
+
+/**
+ * A telegraphed ground strike: the red circle. Spawned at fire time with the
+ * impact point and the fuse already decided, so what the player sees and what
+ * the sim resolves cannot drift apart.
+ *
+ * RENDER CONTRACT: the circle is drawn from `radius` and `fuse/fuseMax` and
+ * NOTHING ELSE. No separate visual radius, no fudge factor, no eased size.
+ * The instant a render constant enters this picture the game starts lying to
+ * the player about where it is safe to stand.
+ */
+export interface Mortar {
+  id: string;
+  /** Impact centre, px. */
+  target: Vec;
+  /** Where it was launched from — the decorative shell's start point. */
+  from: Vec;
+  /** Ticks until detonation; counts down to 0. */
+  fuse: number;
+  /** Fuse at launch — `fuse/fuseMax` is the only timing signal render gets. */
+  fuseMax: number;
+  /** Blast radius, px. Damage applies iff inside it. */
+  radius: number;
 }
 
 // ---------------------------------------------------------------- robot & orders
@@ -100,7 +138,8 @@ export type Order =
   | { kind: 'enter'; targetId: string }
   | { kind: 'explore' } // standing order: tour the floor, visiting interesting things one by one
   | { kind: 'hide' } // find cover breaking line-of-sight to nearest hostile, go there
-  | { kind: 'retreat' }; // back off from the nearest hostile until it is out of sight
+  | { kind: 'retreat' } // back off from the nearest hostile until it is out of sight
+  | { kind: 'evade' }; // keep moving through open ground: never stand where it just stood
 
 /**
  * A persistent behaviour switch the player sets by talking ("avoid the
@@ -119,7 +158,20 @@ export type DirectiveKind =
   | 'careful' // move slow + quiet by default
   | 'bold'
   | 'act_alone' // go off and explore the floor unprompted, not just react
-  | 'wait_for_orders'; // stand still when idle, do nothing unasked
+  | 'wait_for_orders' // stand still when idle, do nothing unasked
+  // Combat doctrine. All of these are readjustments the player makes DURING a
+  // fight, which is why they are directives and not intents: a directive folds
+  // into the standing orders without cancelling whatever the robot is doing.
+  | 'keep_distance' // hold the standoff band and shoot from there
+  | 'close_in' // get in its face (also clears avoid_enemies, sets fight)
+  | 'dodge_projectiles' // treat telegraphed blast zones as things to route around
+  | 'ignore_projectiles'
+  | 'keep_moving' // never plant: strafe between shots
+  | 'hold_ground'
+  | 'focus_dangerous' // shoot the worst threat first, not the closest
+  | 'focus_nearest'
+  | 'use_rockets'
+  | 'use_bolts';
 
 /** Resolved standing orders. Lives on RobotState; the sim reads it every tick. */
 export interface Standing {
@@ -142,6 +194,21 @@ export interface Standing {
   roam: boolean;
   /** Specific entity ids to route wide around ("avoid THAT printer"). */
   avoidIds: string[];
+  /** Engagement range. 'auto' = today's behaviour (close to ATTACK_RANGE and
+   *  plant); 'far' holds a standoff band; 'close' gets in its face. */
+  spacing: 'auto' | 'far' | 'close';
+  /** Target priority. 'auto' = nearest, i.e. today's behaviour. */
+  focus: 'auto' | 'dangerous' | 'nearest';
+  /** Route wide around telegraphed blast zones. Off by default, same reasoning
+   *  as avoidHazards — "avoid the red circles" has to visibly DO something, so
+   *  it must not already be on. The point-blank panic dodge ignores this flag:
+   *  standing in a detonating circle is a bug, not comedy. */
+  dodgeZones: boolean;
+  /** Never plant while fighting — strafe between shots. */
+  keepMoving: boolean;
+  /** Which gun. 'bolt' until the floor-6 crate exists, and the robot falls back
+   *  to bolts anyway when it has no launcher. */
+  weapon: 'bolt' | 'rocket';
 }
 
 export function defaultStanding(): Standing {
@@ -158,6 +225,14 @@ export function defaultStanding(): Standing {
     autonomy: true,
     roam: false,
     avoidIds: [],
+    // Every combat-doctrine field defaults to "however the robot already
+    // fought", so adding them changed nothing. Each one only exists once the
+    // player has said the sentence that turns it on.
+    spacing: 'auto',
+    focus: 'auto',
+    dodgeZones: false,
+    keepMoving: false,
+    weapon: 'bolt',
   };
 }
 
@@ -172,6 +247,13 @@ export function standingLabels(s: Standing): string[] {
   if (!s.gather) out.push('NO LOOT');
   if (s.roam) out.push('ROAMING');
   if (!s.autonomy) out.push('ON LEASH');
+  if (s.spacing === 'far') out.push('KEEP BACK');
+  else if (s.spacing === 'close') out.push('CLOSE IN');
+  if (s.focus === 'dangerous') out.push('BIG FIRST');
+  else if (s.focus === 'nearest') out.push('NEAR FIRST');
+  if (s.dodgeZones) out.push('DODGE');
+  if (s.keepMoving) out.push('KEEP MOVING');
+  if (s.weapon === 'rocket') out.push('ROCKETS');
   if (s.avoidIds.length > 0) out.push(`AVOID ×${s.avoidIds.length}`);
   return out;
 }
@@ -225,6 +307,11 @@ export interface RobotState {
   damage: number;
   /** Weapon cooldown ticks remaining. */
   shootCd: number;
+  /** Rocket cooldown ticks remaining. Its own clock: the launcher is a much
+   *  slower weapon, and sharing shootCd would make swapping guns a free reload. */
+  rocketCd: number;
+  /** Launcher installed (floor-6 crate). Without it, standing.weapon is a wish. */
+  rockets: boolean;
   /** Ticks robot has been continuously blocked by a wall (drives bump comedy). */
   wallBumpTicks: number;
 }
@@ -254,7 +341,12 @@ export type SimEventType =
   | 'self_order' // robot chose its own next task — { what, label }
   | 'need_orders' // robot is idle and out of ideas: it wants to be told something
   | 'threat_seen' // spotted a hostile and is HOLDING for instructions, not charging
-  | 'path_failed'; // no route exists to the ordered target
+  | 'path_failed' // no route exists to the ordered target
+  | 'mortar_launch' // a blast zone was painted — { radius, fuse }
+  | 'mortar_impact' // it went off — { radius, hit }
+  | 'zone_dodge' // robot bailed out of a live blast zone
+  | 'boss_phase' // boss crossed an hp threshold — { phase }
+  | 'weapon_idea'; // robot has an opinion about which gun to use
 
 export interface SimEvent {
   type: SimEventType;
@@ -273,6 +365,14 @@ export interface SimState {
   robot: RobotState;
   entities: Entity[];
   projectiles: Projectile[];
+  /** Live telegraphed blast zones. Deliberately NOT entities: the player never
+   *  says "go to the red circle" — every circle phrase is a policy — and
+   *  entity-ness would cost an exclusion filter in a dozen scan loops, each one
+   *  a place a future circle silently becomes a thing the robot walks towards. */
+  mortars: Mortar[];
+  /** Monotonic id counter for anything the sim spawns. Ticks are NOT unique:
+   *  two projectiles born on the same tick used to share an id. */
+  nextId: number;
   /** Walkability grid [y][x], true = solid. Rebuilt on floor load. */
   solid: boolean[][];
   /** Events emitted by the LAST step() call — drained (replaced) each step. */
@@ -296,6 +396,15 @@ export type IntentType =
   | 'name_robot' // naming beat; `name` holds the name
   | 'choose' // triad; `choice` holds ChipId
   | 'hide' // take cover from the nearest hostile
+  /**
+   * "run!", "get out of there", "fall back". The panic button, and deliberately
+   * an INTENT rather than a directive: fleeing is something the robot does RIGHT
+   * NOW and stops doing, not a rule it keeps. The persistent sense the operator
+   * might also mean — "keep running, never plant" — is already `keep_moving`,
+   * and a second standing rule that also meant "run" would only fight it.
+   * Resolves to a `retreat` or `evade` order via sim.fleeOrder().
+   */
+  | 'flee'
   | 'avoid' // standing order — route wide around `target` from now on
   | 'directive' // pure standing-order change, no movement ("stop picking things up")
   | 'affirm' // "yes" / "do it" — answers the robot's own pending question
@@ -341,6 +450,21 @@ export interface ParsedCommand {
   name?: string;
   /** Robot's repeat-back / reply, toddler-speak, ≤7 words, third person. */
   ack_line: string;
+  /**
+   * TALK: the long-form conversational answer, only ever set on `chatter`.
+   *
+   * The operator is not only an order-giver, they are the robot's one friend,
+   * and a friend who answers "how are you" with five words and nothing else is
+   * not someone you bond with. This is the channel where the robot gets to
+   * ramble — but "longer" here means MORE SENTENCES, never longer ones: each
+   * entry obeys the same ≤7-word toddler cap as `ack_line` (CLAUDE.md rule 7),
+   * and the director speaks them one after another. A robot that suddenly
+   * produces a subordinate clause stops being the robot.
+   *
+   * Only filled when `calm` — mid-fight the robot deflects instead, in one
+   * line, because a companion that chats while being shot at is a toy.
+   */
+  talk?: string[];
   /** Player insulted the robot → sulk. */
   insult?: boolean;
   /** Where the parse came from (server sets). */
@@ -354,6 +478,12 @@ export interface ParseEntity {
   /** Rough bearing/distance from robot, for "the one on the left". */
   dir?: string;
   dist?: number;
+  /** Threat rank among the live hostiles, 1 = worst. Hostiles only, absent
+   *  everywhere else. Gives "shoot the dangerous one" something to bind to. */
+  rank?: number;
+  /** Body class, so "the big one" resolves to a WORD rather than to a number
+   *  the model has to compare across entities. */
+  size?: 'small' | 'big' | 'boss';
 }
 
 export interface ParseRequest {
@@ -390,6 +520,14 @@ export interface ParseRequest {
   maxHp: number;
   /** Hands full (carrying the fuse) — no shooting, and it knows it. */
   carrying: boolean;
+  /**
+   * Nothing hostile in sight — the robot is free to actually TALK (see
+   * `ParsedCommand.talk`). False means a machine is awake and looking at it,
+   * and small talk gets deflected rather than answered: "ROBOT IS BUSY BEING
+   * BRAVE. TALK AFTER." The gate is the director's, computed from the sim; the
+   * model is only told which side of it we are on.
+   */
+  calm: boolean;
 }
 
 // ---------------------------------------------------------------- robot voice (unprompted)
@@ -436,7 +574,10 @@ export interface SayResponse {
   line: string;
   /** True when `line` ends on a question the operator is expected to answer. */
   question?: boolean;
-  proposal?: { intent: IntentType; target?: string; dir?: Dir } | null;
+  /** `directives` lets a proposal be a RULE rather than a destination, so a
+   *  briefing whose best answer is "SHOULD ROBOT KEEP BACK?" can be agreed to
+   *  with a plain "yes". Executed through the same path as a parsed command. */
+  proposal?: { intent: IntentType; target?: string; dir?: Dir; directives?: DirectiveKind[] } | null;
   source?: 'llm' | 'local';
 }
 
@@ -525,8 +666,15 @@ export interface UpgradeReveal {
  *  the glyph at exactly this moment, so the strip pops as the icon lands —
  *  which is the whole trick that ties "I got a thing" to "it is up there now". */
 export const UPGRADE_LAND_MS = 2100;
-/** When the reveal is over and `UiState.upgrade` goes back to null. */
-export const UPGRADE_TOTAL_MS = 2400;
+/**
+ * When the reveal is over and `UiState.upgrade` goes back to null.
+ *
+ * The card used to vanish 300ms after the icon landed, which is long enough to
+ * SEE it and nowhere near long enough to READ it — and the blurb is the only
+ * place the game ever explains what a module actually does. The world stays
+ * frozen for this whole window, so the cost is dead air the player asked for.
+ */
+export const UPGRADE_TOTAL_MS = 4200;
 
 export interface UiState {
   phase: GamePhase;
@@ -633,7 +781,22 @@ export type SfxName =
   | 'scrap' // pickup chime
   | 'spin' // celebratory idle spin whir
   | 'fuse_in'
-  | 'title'; // title card sting
+  | 'title' // title card sting
+  | 'mortar_launch' // boss lobs one — hollow thump + rising whistle
+  | 'mortar_warn' // the circle's last-moment warning beeps
+  | 'boom_small'
+  | 'boom_big'
+  | 'boom_huge' // the boss dying
+  | 'rocket_fire'
+  | 'boss_roar'
+  | 'alarm'; // facility klaxon (boss floor arrival)
+
+/**
+ * How the robot got hurt. Carried through damageRobot so a later phase can give
+ * each channel its own i-frame budget — a swarm's paper stacking is what makes
+ * numbers matter, and it must not also halve the cost of driving over a cable.
+ */
+export type DamageChannel = 'contact' | 'projectile' | 'blast' | 'hazard';
 
 export interface AudioEngine {
   /** Must be called from a user gesture. Starts hum. */
@@ -647,7 +810,10 @@ export interface AudioEngine {
   /** Room-tone hum level 0..1. */
   setHum(level: number): void;
   /** Synth beeps for teletype/OSD ticks. */
-  blip(kind: 'teletype' | 'osd' | 'warn'): void;
+  /** 'type' is the near-subliminal caption-typewriter tick — far softer than
+   *  'teletype'. It was reachable in the engine but not through this interface,
+   *  which meant a caller coding against the contract could not ask for it. */
+  blip(kind: 'teletype' | 'osd' | 'warn' | 'type'): void;
   readonly ready: boolean;
 }
 
@@ -659,4 +825,30 @@ export interface ArtAtlas {
   frames(name: string): unknown[];
   /** Single texture (first frame). */
   tex(name: string): unknown;
+}
+
+// ---------------------------------------------------------------- wishlist
+
+/**
+ * The email gate that stands between a finished run and the next one.
+ *
+ * The client owns the hard part of the contract: a run does not restart until
+ * the player has typed something that looks like an email. The server is
+ * best-effort persistence — if Postgres or the network is down the player still
+ * gets to play (rule 4's spirit: nothing in this game may require a backend).
+ */
+export interface WishlistRequest {
+  email: string;
+  /** Floor reached on the run that just ended. */
+  floor?: number;
+  /** Whatever the player named the robot — the only other thing worth keeping. */
+  robotName?: string;
+}
+
+export interface WishlistResponse {
+  ok: true;
+  /** True when this email was already on the list (re-submits are not errors). */
+  already: boolean;
+  /** False when the server has no database and only wrote a log line. */
+  stored: boolean;
 }

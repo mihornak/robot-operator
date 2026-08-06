@@ -24,19 +24,21 @@ import type {
 } from '@shared/types';
 import { TICK_MS, TILE, UPGRADE_LAND_MS, UPGRADE_TOTAL_MS, standingLabels } from '@shared/types';
 import { CHIPS, MODULES, TRIADS } from '@shared/content';
+import { deflectTalk } from '@shared/smallTalk';
 import { BANK_BY_ID, LINE_GROUPS } from '@shared/voiceLines';
 import { makeRng } from '@shared/rng';
 
 import * as sim from '../sim/index';
 import { initArt } from '../art/index';
 import { createRenderApp } from '../render/index';
-import { createAudioEngine } from '../audio/engine';
+import { blastGain, createAudioEngine } from '../audio/engine';
 import { SILENT_RMS, WebSpeechSource } from '../voice/webspeech';
 import { TeletypeSource } from '../voice/teletype';
 import { parseLocal } from '../voice/localParser';
 import { apiParse, apiSay, logEvent } from '../net/api';
 import type { SpeechPriority } from './speech';
 import { SpeechQueue } from './speech';
+import { WishlistGate } from './wishlist';
 
 const uiRng = makeRng(0xc0ffee); // presentation-only randomness
 
@@ -45,6 +47,14 @@ function pick<T>(arr: readonly T[]): T {
 }
 
 /** FIRST_MINUTES beat-1 wait ladder: deterministic idles at 5s/10s/20s of silence. */
+/**
+ * Floors in the authored run. The 6th is THE SHREDDER, and it is the ending:
+ * ride out of it and the feed dies on the cliffhanger. Kept as a named constant
+ * rather than `FLOORS.length` so a future scratch floor appended for tooling
+ * cannot silently extend the story.
+ */
+const FLOORS_IN_RUN = 6;
+
 const WAIT_LADDER = [
   { at: 10000, line: 'idle_here' },
   { at: 28000, line: 'idle_spin' },
@@ -147,6 +157,8 @@ class Director {
   private speech!: SpeechQueue;
   private speechSource: CommandSource | null = null;
   private teletype = new TeletypeSource();
+  /** Owns the screen and the keyboard between a finished run and the next one. */
+  private wishlist = new WishlistGate();
 
   // beat state
   private woken = false;
@@ -191,6 +203,24 @@ class Director {
   /** Kind of the last order the director set — sim nulls robot.order before order_done fires. */
   private lastOrderKind: Order['kind'] | null = null;
   private parsing = false;
+  /** Remote parses still in flight that we have NOT already answered locally.
+   *  `parsing` is derived from this: a fast-applied utterance is ANSWERED, so
+   *  the mic goes idle and the robot is free to talk while the model catches up. */
+  private slowPending = 0;
+  /**
+   * Monotonic utterance counter. A remote result whose seq is not the newest is
+   * stale and is thrown away — which is what lets a second utterance be spoken
+   * while the first is still in flight instead of being dropped whole. runEpoch
+   * still covers the across-death case; this covers the within-life one.
+   */
+  private parseSeq = 0;
+  /** Reaction times in ms, by which path produced the first visible reaction. */
+  private lat: Record<'fast' | 'llm' | 'local_fallback', number[]> = {
+    fast: [],
+    llm: [],
+    local_fallback: [],
+  };
+  private reconciled = { confirm: 0, refine: 0, held: 0 };
   private booting = false;
   private ended = false;
   /** Bumped on restart/death/cliffhanger — in-flight parses from before are void. */
@@ -250,7 +280,10 @@ class Director {
     if (import.meta.env.DEV) {
       const q = new URLSearchParams(location.search);
       const f = parseInt(q.get('floor') ?? '', 10);
-      if (f >= 1 && f <= 5) {
+      // Bounded on the floor TABLE, not on a literal: a floor that exists and
+      // cannot be reached by the shortcut that exists to reach it is a floor
+      // nobody tests.
+      if (f >= 1 && f <= sim.FLOOR_COUNT) {
         this.woken = true;
         sim.wakeRobot(this.state);
         this.awaitingFirstOrder = false;
@@ -258,10 +291,29 @@ class Director {
         this.state.robot.name = this.playerGivenName;
         if (q.get('ears') === '1' || f >= 4) sim.applyEars(this.state); // EARS crate is floor 3
         if (f >= 5) sim.applyBrain(this.state); // BRAIN crate is floor 4
+        // The boss floor is not reachable by clearing floor 5 — it is appended
+        // off the end of the run and this shortcut is the ONLY door into it. So
+        // this line is not a convenience, it is the arena's loadout:
+        //
+        // MEASURED, five seeds, the shredder at 96 hp with its adds running:
+        // a base robot (damage 1, 24-tick cooldown) loses 5/5. It lands 40–60
+        // damage across 26–43 seconds and dies with the boss still in phase 1 —
+        // its six hit points are simply not a budget that stretches over a
+        // fight four times longer than the one they were priced for. The same
+        // robot with ZAP (damage 2, 16-tick cooldown) wins, in 22–42 seconds,
+        // living through all three phases and finishing on 0–5 hp.
+        //
+        // Nothing in the authored five floors grants ZAP (the only loose chip
+        // in the run is MEMORY, on floor 2), so without this the trailer floor
+        // is unwinnable by construction. The real fix is the ROCKET crate in
+        // the arena becoming a genuine second answer — today the launcher has
+        // no caller in sim/robot.ts at all, see rocketCeremony below.
+        if (f >= 6) sim.applyChip(this.state, 'ZAP');
         // …and the OSD strip has to agree with what was just installed, or the
         // dev shortcut lies about the state it just built.
         if (this.state.robot.tier >= 2) this.modules.push('EARS');
         if (this.state.robot.ideas) this.modules.push('BRAIN');
+        for (const c of this.state.robot.chips) this.modules.push(c);
         this.ui.glyphs = [...this.modules];
         sim.loadFloor(this.state, f - 1);
         if (!this.state.robot.hasMemory) this.state.robot.name = null;
@@ -333,6 +385,7 @@ class Director {
 
   private onKeyDown(e: KeyboardEvent): void {
     if (e.repeat) return;
+    if (this.wishlist.open) return; // the gate owns the keyboard while it is up
     const phase = this.ui.phase;
 
     if (phase === 'off') {
@@ -340,12 +393,9 @@ class Director {
       return;
     }
     if (phase === 'boot') return;
-    if (phase === 'death') {
-      this.restart();
-      return;
-    }
-    if (phase === 'title') {
-      this.restart();
+    // The two last frames of a run. Both loop back — through the gate.
+    if (phase === 'death' || phase === 'title') {
+      this.gateThenRestart();
       return;
     }
     if (phase === 'cliffhanger') return;
@@ -385,7 +435,22 @@ class Director {
     }
   }
 
+  /** A run does not loop until the player has left an address (game/wishlist.ts). */
+  private gateThenRestart(): void {
+    if (this.wishlist.satisfied) {
+      this.restart();
+      return;
+    }
+    void this.wishlist
+      .show({
+        floor: this.state.floorIndex + 1,
+        robotName: this.state.robot.name ?? this.playerGivenName ?? undefined,
+      })
+      .then(() => this.restart());
+  }
+
   private onKeyUp(e: KeyboardEvent): void {
+    if (this.wishlist.open) return;
     if (e.code === 'Space' && this.ui.pttHeld) {
       e.preventDefault();
       void this.endPtt();
@@ -620,20 +685,207 @@ class Director {
       return;
     }
 
-    if (this.parsing) {
-      // One parse in flight at a time — overlapping utterances are dropped whole.
-      logEvent('utterance_dropped');
-      return;
-    }
-    this.parsing = true;
-    this.ui.micState = 'thinking';
+    const t0 = performance.now();
     const epoch = this.runEpoch;
-    const cmd = await this.parse(u);
-    this.parsing = false;
-    this.ui.micState = 'idle';
+    const seq = ++this.parseSeq;
+    this.remember(`VOICE: ${u.text}`);
+    const req = this.parseRequest(u);
+
+    // LOCAL FIRST, synchronously. The keyword matcher is a table lookup — it
+    // costs microseconds, and for the handful of shapes in fastEligible() its
+    // answer cannot be wrong in a way that is worth 1.5 seconds of waiting.
+    // The model still runs, and still gets the last word (see reconcile).
+    const local = parseLocal(u.text, {
+      tier: req.tier,
+      options: req.options,
+      awaitingName: req.awaitingName,
+      entities: req.entities,
+      brain: req.brain,
+      pendingQuestion: req.pendingQuestion,
+      robotName: req.robotName,
+      recent: req.recent,
+      calm: req.calm,
+    });
+    const fast = this.fastEligible(local, u.text.trim().split(/\s+/).filter(Boolean).length);
+    if (fast) {
+      this.apply(local);
+      this.reaction(t0, 'fast', local.intent);
+      // Answered. The mic goes straight back to idle rather than sitting on
+      // "thinking" for a second and a half about a decision already made.
+      if (!this.ui.pttHeld) this.ui.micState = 'idle';
+    } else {
+      this.slowPending++;
+      this.parsing = true;
+      this.ui.micState = 'thinking';
+    }
+
+    let remote: ParsedCommand | null = null;
+    try {
+      remote = await apiParse(req);
+    } catch {
+      remote = null; // network/timeout — the local reading is all we have
+    }
+    if (!fast) {
+      this.slowPending = Math.max(0, this.slowPending - 1);
+      this.parsing = this.slowPending > 0;
+      if (!this.parsing && !this.ui.pttHeld) this.ui.micState = 'idle';
+    }
     // The world changed under the parse (death/restart/ending) — result is void.
     if (epoch !== this.runEpoch || !this.simRunning()) return;
-    this.apply(cmd);
+    // ...and so is a result the operator has already talked over.
+    if (seq !== this.parseSeq) {
+      logEvent('parse_stale', { fast: fast ? 1 : 0 });
+      return;
+    }
+
+    if (!fast) {
+      const cmd = remote ?? local;
+      this.apply(cmd);
+      this.reaction(t0, remote ? 'llm' : 'local_fallback', cmd.intent);
+      return;
+    }
+    if (remote) this.reconcile(local, remote);
+  }
+
+  /**
+   * May this local reading be applied NOW, before the model has spoken?
+   *
+   * The criterion is STRUCTURAL, not a confidence score. There is no confidence
+   * anywhere in this pipeline, and inventing a number over a keyword matcher
+   * would be fiction dressed as maths. What is safe is decided by SHAPE:
+   *
+   * - The panic class — stop, hide, a short move+direction. These are reflexes.
+   *   The operator is reacting to something on screen and a model disagreeing
+   *   1.5 seconds later is never worth the delay.
+   * - The directive class — and this one is FREE, which is why the whole design
+   *   works. applyDirectives runs BEFORE the intent switch and the `directive`
+   *   case touches no order, so applying a rule early cannot cancel, redirect
+   *   or hitch anything the robot is currently doing.
+   *
+   * Everything target-bearing is excluded: a wrong `goto` visibly sends the
+   * robot across the room, and that is exactly what the model is for. affirm
+   * and deny are excluded because they CONSUME pendingProposal — firing one
+   * twice corrupts state that has no second copy.
+   */
+  private fastEligible(c: ParsedCommand, tokens: number): boolean {
+    if (this.awaitingName || this.ceremony || this.pendingQuestion) return false;
+    if (c.insult) return false;
+    if (c.plan && c.plan.length > 0) return false;
+    if (c.target) return false;
+    if (c.intent === 'affirm' || c.intent === 'deny') return false;
+    // Long sentences are briefs, not reflexes; the model reads those better.
+    if (tokens > 6) return false;
+    if (c.intent === 'stop' || c.intent === 'hide') return true;
+    // "RUN!" is the definitive reflex utterance. Waiting a second and a half
+    // for the model to confirm a panic order is the exact failure this path
+    // exists to prevent — and unlike a goto, being wrong about it is cheap.
+    if (c.intent === 'flee') return true;
+    // Step COUNTS are where STT homophones bite hardest ("go to steps right"),
+    // and reconciling those is the single thing the model is most useful for.
+    if (c.intent === 'move' && c.dir && c.amount !== 'step') return true;
+    if (c.intent === 'directive' && c.directives && c.directives.length > 0) return true;
+    return false;
+  }
+
+  /**
+   * The model landed a second behind a reading we already acted on.
+   *
+   * Same shape → say NOTHING. The robot already answered, and answering twice
+   * is the fast path handing back the second it just saved.
+   * Different shape → refine, with one exception: a `clarify` or `chatter` is
+   * not evidence against a halt the operator already watched land. A shrug must
+   * never undo a stop.
+   */
+  private reconcile(fast: ParsedCommand, remote: ParsedCommand): void {
+    const sameCore =
+      remote.intent === fast.intent &&
+      (remote.dir ?? null) === (fast.dir ?? null) &&
+      (remote.target ?? null) === (fast.target ?? null);
+    const newRules = (remote.directives ?? []).filter((d) => !(fast.directives ?? []).includes(d));
+
+    if (sameCore) {
+      // Only the rules can still differ, and merging those is silent by
+      // construction — applyDirectives changes no order.
+      if (newRules.length > 0) this.mergeDirectives(newRules);
+      this.reconciled.confirm++;
+      logEvent('parse_confirm', { intent: remote.intent, merged: newRules.length });
+      return;
+    }
+    if (remote.intent === 'clarify' || remote.intent === 'chatter') {
+      if (newRules.length > 0) this.mergeDirectives(newRules);
+      this.reconciled.held++;
+      logEvent('parse_held', { was: fast.intent, model: remote.intent });
+      return;
+    }
+    this.reconciled.refine++;
+    logEvent('parse_refine', { was: fast.intent, now: remote.intent });
+    this.apply(remote);
+  }
+
+  /** Fold in rules the model found and the local reading missed. No speech:
+   *  the ack for this utterance has already been said. */
+  private mergeDirectives(kinds: ParsedCommand['directives']): void {
+    if (!kinds || kinds.length === 0) return;
+    const st = sim.applyDirectives(this.state, kinds);
+    this.ui.orders = standingLabels(st);
+    logEvent('directives', { kinds: kinds.join(','), merged: 1 });
+  }
+
+  /** First VISIBLE reaction to an utterance: the order landed or the caption
+   *  started. Both happen inside apply(), synchronously, so this is the honest
+   *  moment to stop the clock. */
+  private reaction(t0: number, path: 'fast' | 'llm' | 'local_fallback', intent: string): void {
+    const ms = Math.round(performance.now() - t0);
+    this.lat[path].push(ms);
+    logEvent('reaction', { path, ms, intent });
+  }
+
+  /** DEV: `__dir.latencyReport()` in the console. p50/p95 per path, fast-path
+   *  coverage, refine rate — the numbers the fast path has to justify itself on. */
+  latencyReport(): Record<string, unknown> {
+    const q = (a: number[], p: number): number =>
+      a.length === 0 ? 0 : [...a].sort((x, y) => x - y)[Math.min(a.length - 1, Math.floor(a.length * p))]!;
+    const total = this.lat.fast.length + this.lat.llm.length + this.lat.local_fallback.length;
+    const out: Record<string, unknown> = { n: total };
+    for (const k of ['fast', 'llm', 'local_fallback'] as const) {
+      out[k] = { n: this.lat[k].length, p50: q(this.lat[k], 0.5), p95: q(this.lat[k], 0.95) };
+    }
+    out.fastCoverage = total === 0 ? 0 : +(this.lat.fast.length / total).toFixed(3);
+    const rec = this.reconciled.confirm + this.reconciled.refine + this.reconciled.held;
+    out.reconcile = { ...this.reconciled, refineRate: rec === 0 ? 0 : +(this.reconciled.refine / rec).toFixed(3) };
+    return out;
+  }
+
+  /**
+   * Say a RUN of sentences as one turn of conversation.
+   *
+   * Two rules make this work rather than turn the robot into a monologue
+   * machine. First, the combat gate is re-checked HERE, at the moment of
+   * speaking, not only where the reply was written: a parse takes seconds and
+   * a machine can wake up inside them, and a warm three-sentence answer landing
+   * while the robot is being shot at is worse than no feature at all. Second,
+   * each sentence is its own speech item — one caption line, one TTS clip, a
+   * beat between them — so the robot sounds like it is thinking between
+   * sentences instead of reciting a paragraph.
+   */
+  private speakRun(lines: string[]): void {
+    const name = (this.state.robot.name ?? 'ROBOT').toUpperCase();
+    const calm = !sim.canSeeHostile(this.state) && !this.ceremony;
+    const run = (calm ? lines : deflectTalk(name, this.dialogue, lines[0] ?? name))
+      .map((l) => l.trim().toUpperCase())
+      .filter(Boolean)
+      .slice(0, 4);
+    if (run.length === 0) return;
+    for (let i = 0; i < run.length; i++) {
+      this.remember(`ROBOT: ${run[i]}`);
+      this.speech.sayText(run[i]!, 'ack', i === run.length - 1 ? undefined : 220);
+    }
+    this.lastHeard = run[run.length - 1]!;
+    // Nothing unprompted on top of a conversation. Being asked "how are you"
+    // and answering it while the idle ladder simultaneously asks for a job is
+    // two robots talking at once.
+    this.quietFor(3000 + run.length * 1600);
+    logEvent('talk', { lines: run.length, calm: calm ? 1 : 0 });
   }
 
   /** Keep the last few turns of both sides — the parser's conversation memory. */
@@ -711,6 +963,11 @@ class Director {
             intent: res.proposal.intent,
             ...(res.proposal.target ? { target: res.proposal.target } : {}),
             ...(res.proposal.dir ? { dir: res.proposal.dir } : {}),
+            // A proposal may be a RULE rather than a destination — "SHOULD
+            // ROBOT KEEP BACK?" is the most useful thing it can ask when it
+            // walks into a room with three machines in it, and "yes" has to
+            // mean something. apply() already knows how to install directives.
+            ...(res.proposal.directives?.length ? { directives: res.proposal.directives } : {}),
             ack_line: 'ROBOT DOES IT.',
           };
           this.questionUntil = performance.now() + (res.question ? 25000 : 12000);
@@ -776,11 +1033,14 @@ class Director {
     this.nextIdleVoiceAt = now + jitter(26000, 40000);
   }
 
-  private async parse(u: Utterance): Promise<ParsedCommand> {
+  /** Everything the interpreter needs about the world right now. Built once and
+   *  shared by BOTH readings, so the local fast path and the model are looking
+   *  at the same room — a fast reading resolved against different entities than
+   *  the model saw would make reconcile() lie. */
+  private parseRequest(u: Utterance): ParseRequest {
     const src = this.speechSource instanceof WebSpeechSource ? this.speechSource : null;
-    this.remember(`VOICE: ${u.text}`);
     const r = this.state.robot;
-    const req: ParseRequest = {
+    return {
       utterance: u.text,
       alternatives: u.source === 'speech' ? (src?.alternatives ?? []) : [],
       tier: r.tier,
@@ -799,19 +1059,11 @@ class Director {
       hp: r.hp,
       maxHp: r.maxHp,
       carrying: r.carrying !== null,
+      // Is there room in the moment for an actual conversation? Nothing awake
+      // and hostile in view, and no ceremony waiting on an answer. The engine
+      // decides this, never the model — see ParsedCommand.talk.
+      calm: !sim.canSeeHostile(this.state) && !this.ceremony,
     };
-    try {
-      return await apiParse(req);
-    } catch {
-      return parseLocal(u.text, {
-        tier: req.tier,
-        options: req.options,
-        awaitingName: req.awaitingName,
-        entities: req.entities,
-        brain: req.brain,
-        pendingQuestion: req.pendingQuestion,
-      });
-    }
   }
 
   /**
@@ -877,12 +1129,26 @@ class Director {
       cmd = { ...cmd, ack_line: 'ROBOT GOES. FIGHTS. HIDES. GRABS.' };
     }
 
+    // A conversational answer logs its OWN sentences below; remembering the
+    // one-line summary as well would have the robot reading its dialogue back
+    // to itself twice and repeating shapes it thinks it has not used.
+    const talking = cmd.intent === 'chatter' && (cmd.talk?.length ?? 0) > 0;
     this.lastHeard = cmd.ack_line.toUpperCase();
-    this.remember(`ROBOT: ${this.lastHeard}`);
+    if (!talking) this.remember(`ROBOT: ${this.lastHeard}`);
     if (cmd.insult) {
       sim.sulk(this.state, 180);
       this.audio.blip('warn');
       this.speech.sayBank('sulk', 'ack');
+      return;
+    }
+
+    // TALK. The operator stopped giving orders and just spoke to it, and the
+    // robot gets to answer at length — several short sentences, one after the
+    // other, rather than the single clipped ack every other intent gets. This
+    // is the whole difference between a machine you operate and one you have a
+    // relationship with, and it is why `talk` exists as its own field.
+    if (talking) {
+      this.speakRun(cmd.talk!);
       return;
     }
 
@@ -992,12 +1258,26 @@ class Director {
         this.setOrder({ kind: 'hide' });
         this.lastDid = 'HID.';
         break;
+      // "RUN!" — urgent and one-shot, which is why it is an intent and not a
+      // standing rule. The sim picks retreat vs evade from what it can actually
+      // see (sim.fleeOrder), so this stays a line the director cannot get wrong.
+      case 'flee':
+        this.setOrder(sim.fleeOrder(this.state));
+        this.lastDid = 'RAN AWAY.';
+        break;
       case 'avoid': {
         const target = cmd.target ? sim.entityById(this.state, cmd.target) : null;
         if (!target || target.dead) break; // ack already voiced the confusion
-        // Standing order — no order change, the avoid-list rides along.
+        // Standing order — the avoid-list rides along; a running order keeps
+        // running and simply re-plans around the new cost.
         sim.addAvoid(this.state, target.id);
         this.ui.orders = standingLabels(this.state.robot.standing);
+        // ...but "go around the cables" said to a STOPPED robot is a movement
+        // instruction, not a rule change. Answering it with a new rule and no
+        // motion is the acknowledge-and-do-nothing failure again: the operator
+        // asked for a different ROUTE, and a route needs somewhere to be going.
+        // Resume the objective so the rule they just set is visibly obeyed.
+        if (this.state.robot.order === null) this.resumeObjective();
         break;
       }
       case 'directive':
@@ -1014,7 +1294,7 @@ class Director {
     }
     if (
       this.awaitingFirstOrder &&
-      ['move', 'stop', 'shoot', 'goto', 'attack', 'explore', 'pickup', 'hide', 'avoid', 'directive', 'enter_elevator'].includes(
+      ['move', 'stop', 'shoot', 'goto', 'attack', 'explore', 'pickup', 'hide', 'flee', 'avoid', 'directive', 'enter_elevator'].includes(
         cmd.intent,
       )
     ) {
@@ -1191,6 +1471,45 @@ class Director {
     logEvent('brain_installed');
   }
 
+  /**
+   * THE ROCKET CRATE (floor 6). The one upgrade in the boss arena, and until
+   * now the one that did nothing: `crate_reached` dispatched on id and had
+   * cases for EARS, BRAIN and the triad, so the rocket crate — the second
+   * weapon, the whole reason to cross a room under mortar fire — fell through
+   * this switch in silence. The player walked to the shiny box and the shiny
+   * box was scenery.
+   *
+   * The install beat is the same one every other module gets — showUpgrade owns
+   * the freeze, the fullscreen icon, the flight into the OSD strip and the thaw
+   * — so the second weapon lands with exactly the weight EARS and BRAIN do.
+   *
+   * It grants the launcher AND switches to it, which is not the pattern the
+   * chips use and is deliberate. The other upgrades are installed somewhere
+   * quiet and the player has all the time in the world to try them; this one is
+   * collected mid-boss-fight, and a reward that requires you to know a phrase
+   * you have never been taught before it does anything is a reward the player
+   * files as broken. It fires, and THEN the robot teaches the phrase, so "use
+   * the small gun" is an informed choice rather than the only exit from a
+   * weapon you cannot switch off.
+   */
+  private rocketCeremony(): void {
+    this.clearThenChain();
+    // Direct, because sim/index.ts belongs to another stream this round; the
+    // one-line home for this is `applyRockets(state)` beside applyEars/
+    // applyBrain, and it should move there.
+    this.state.robot.rockets = true;
+    sim.applyDirectives(this.state, ['use_rockets']);
+    sim.openCrate(this.state, 'crate_ROCKET');
+    this.showUpgrade('ROCKET'); // owns the freeze, the sfx, the strip and the thaw
+    // sayText, not sayBank: there is no `new_rocket` line in the voice bank
+    // (shared/voiceLines.ts is another stream's file, and an unknown bank id
+    // resolves to an EMPTY caption, which is worse than realtime TTS).
+    this.speech.sayText('ROBOT HAS BIG PEW PEW NOW.', 'beat', 400);
+    this.speech.sayText('SAY BIG PEW PEW. OR SMALL PEW PEW.', 'beat');
+    this.lastDid = 'GOT BIG PEW PEW.';
+    logEvent('rockets_installed');
+  }
+
   // ---------------------------------------------------------------- sim events
 
   private processEvents(events: SimEvent[]): void {
@@ -1255,13 +1574,32 @@ class Director {
         case 'threat_seen': {
           // The robot has seen something and is deliberately NOT charging it.
           // Reporting and holding is the point: whether this is a fight is the
-          // operator's call, and making that call is the game.
+          // operator's call, and making that call is the game. This is the 70%
+          // of instruction that happens on first contact.
+          //
+          // The roll-call goes in `detail` — the MODEL's context — and never in
+          // the spoken line. The robot reciting "THREE MACHINES. ONE IS BIG.
+          // ONE IS SHOOTING." is a lecture; the operator needs one short line
+          // and then a beat to look at the room themselves. Silence is content
+          // (FIRST_MINUTES rule 3), which is what the quietFor below buys.
           const e = ev.id ? sim.entityById(this.state, ev.id) : null;
+          const count = Number(ev.data?.count ?? 1);
+          const worst = String(ev.data?.worst ?? e?.label ?? 'machine');
+          const boss = Number(ev.data?.boss ?? 0) > 0;
+          const roll =
+            count > 1
+              ? `${count} machines are awake, the worst of them a ${worst}`
+              : `a ${worst} about ${ev.data?.dist ?? '?'} away`;
           this.voice(
             'enemy_spotted',
-            `has spotted a ${e?.label ?? 'machine'} about ${ev.data?.dist ?? '?'} away and is holding still, waiting to be told whether to fight it or go around`,
+            `has stopped dead and is looking at ${roll}${boss ? ', and one of them is very much bigger than the rest' : ''}. ` +
+              'It is holding still and waiting to be told how to play this — fight, keep back, dodge, hide, or go around. ' +
+              'Do NOT list them and do NOT count them out loud: ONE short line about what it is looking at, then the question.',
             { priority: 'beat', bank: 'enemy_spot', minGapMs: 3000 },
           );
+          // Then shut up. The operator is reading the room; a second unprompted
+          // noise on top of the one that matters is how a beat becomes chatter.
+          this.quietFor(6000);
           break;
         }
         case 'shot_fired':
@@ -1273,14 +1611,49 @@ class Director {
         case 'enemy_hit':
           this.audio.playSfx('hit');
           break;
-        case 'enemy_death':
-          this.audio.playSfx('enemy_die');
+        case 'enemy_death': {
+          const dead = ev.id ? sim.entityById(this.state, ev.id) : null;
+          if (dead?.kind === 'fusedShredder') {
+            // The kill is a SEQUENCE, not a pop: silence, then everything at
+            // once. The 200ms of nothing is what makes the blast land — see
+            // the beat sheet.
+            this.audio.playSfx('boom_huge');
+            this.render.fx.shake(9, 900);
+            this.render.fx.staticBurst(160);
+            window.setTimeout(() => this.render.fx.glitchFrame(), 140);
+            // The exit is dark for the whole fight, which is what makes the
+            // shredder the way out rather than an obstacle beside it. Killing
+            // it powers the lift — without this the ending is unreachable and
+            // the player is sealed in a room with a corpse.
+            sim.powerElevatorB(this.state);
+          } else {
+            this.audio.playSfx('enemy_die');
+            // Nothing used to shake when anything died, which is most of why
+            // combat read as weightless.
+            this.blastShake(2, 160, dead?.pos ?? null);
+          }
           if (ev.id === 'printer_nice') {
             this.speech.sayBank('wrong_target', 'bark');
             logEvent('wrong_target');
           } else {
             this.speech.sayBank('enemy_dead', 'bark');
           }
+          break;
+        }
+        // Every AoE detonation. The frame kicks even when it lands across the
+        // room — the camera is bolted to the ceiling of the room being shelled,
+        // which is what makes the arena feel like one space and not a diorama.
+        case 'mortar_impact': {
+          const at = { x: Number(ev.data?.x ?? 0), y: Number(ev.data?.y ?? 0) };
+          this.audio.playSfx('boom_big', {
+            volume: blastGain(Math.hypot(this.state.robot.pos.x - at.x, this.state.robot.pos.y - at.y)),
+          });
+          this.blastShake(5, 300, at);
+          if (Number(ev.data?.hit ?? 0) > 0) this.render.fx.glitchFrame();
+          break;
+        }
+        case 'mortar_launch':
+          this.audio.playSfx('mortar_launch', { volume: 0.7 });
           break;
         case 'enemy_spotted': {
           const e = ev.id ? sim.entityById(this.state, ev.id) : null;
@@ -1319,6 +1692,7 @@ class Director {
           const floor = this.state.floorIndex + 1;
           if (ev.id === 'crate_EARS') this.earsCeremony();
           else if (ev.id === 'crate_BRAIN') this.brainCeremony();
+          else if (ev.id === 'crate_ROCKET') this.rocketCeremony();
           else if (ev.id === 'crate_triad' && TRIADS[floor] && !this.ceremony) {
             this.startCeremony(floor);
           }
@@ -1393,6 +1767,37 @@ class Director {
 
   // ---------------------------------------------------------------- floors, death, ending
 
+  /**
+   * Blast shake, attenuated by distance from the robot — but never to zero.
+   * The camera is bolted to the ceiling of the room being shelled, so a
+   * detonation across the hall still bumps the frame. That floor is the whole
+   * trick: it is what makes the arena read as ONE room rather than a diorama
+   * the robot happens to be standing in.
+   */
+  /**
+   * Send the robot on with whatever it was already doing, or — failing that —
+   * toward the way out. Used when the player gives a ROUTING instruction to a
+   * stationary robot ("go around the cables"): re-stating the goal is the only
+   * way a new route can show itself.
+   *
+   * The exit is the fallback rather than a guess at intent: it is the one place
+   * every floor is trying to get to, and it is what the OSD objective row has
+   * been saying the whole time.
+   */
+  private resumeObjective(): void {
+    const b = sim.entityById(this.state, 'elevB');
+    if (b && !b.dead) this.setOrder({ kind: 'goto', targetId: b.id });
+  }
+
+  private blastShake(px: number, ms: number, at: { x: number; y: number } | null): void {
+    if (!at) {
+      this.render.fx.shake(px, ms);
+      return;
+    }
+    const d = Math.hypot(this.state.robot.pos.x - at.x, this.state.robot.pos.y - at.y);
+    this.render.fx.shake(px * blastGain(d), ms);
+  }
+
   private setOsd(): void {
     const n = this.state.floorIndex + 1;
     this.ui.osd = `CAM 0${n} · FLOOR 0${n} · REC ●`;
@@ -1402,7 +1807,11 @@ class Director {
     const done = this.state.floorIndex + 1;
     logEvent('floor_complete', { floor: done });
     this.audio.playSfx('doors');
-    if (done >= 5) {
+    // Floor 6 is now the last one, and the run ends on the shredder rather than
+    // on a lift door. The boss IS the cliffhanger's setup: the robot has just
+    // done something genuinely hard, which is what makes its closing question
+    // land instead of reading as another gag.
+    if (done >= FLOORS_IN_RUN) {
       this.cliffhanger();
       return;
     }
@@ -1521,20 +1930,29 @@ class Director {
     this.speech.clear();
     this.ui.phase = 'cliffhanger';
     this.ui.upgrade = null;
-    this.ui.osd = 'CAM 06 · FLOOR 06 · NO SIGNAL';
+    // Derived, not hard-coded: this used to read CAM 06 back when the run ended
+    // on floor 5, and quietly became off-by-one the moment the shredder floor
+    // joined the story.
+    const next = this.state.floorIndex + 2;
+    this.ui.osd = `CAM 0${next} · FLOOR 0${next} · NO SIGNAL`;
     this.render.fx.deadCam(true);
     this.audio.playSfx('static_burst');
     this.audio.setHum(0.25);
     logEvent('cliffhanger_reached');
-    setTimeout(() => this.speech.sayBank('cliff_voice1', 'beat', 1100), 1500);
-    setTimeout(() => this.speech.sayBank('cliff_voice2', 'beat', 1100), 4200);
-    setTimeout(() => this.speech.sayBank('cliff_voice3', 'beat'), 6800);
+    // THE ENDING. It has just killed the thing that was shelling it, and the
+    // first thing it does is ask whether that was good. Then nothing answers —
+    // and the silence after the question is the whole cliffhanger. Everything
+    // below is spaced to let that gap sit rather than to fill it.
+    setTimeout(() => this.speech.sayBank('cliff_win', 'beat', 1400), 1200);
+    setTimeout(() => this.speech.sayBank('cliff_voice1', 'beat', 1100), 5200);
+    setTimeout(() => this.speech.sayBank('cliff_voice2', 'beat', 1100), 7900);
+    setTimeout(() => this.speech.sayBank('cliff_voice3', 'beat'), 10500);
     setTimeout(() => {
       this.ui.phase = 'title';
       this.audio.playSfx('title');
       this.ended = false;
       logEvent('title_card');
-    }, 10500);
+    }, 14200);
   }
 
   // ---------------------------------------------------------------- per-frame presentation

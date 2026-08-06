@@ -1,11 +1,21 @@
 /** Thin API client. Every call fail-softs — the game must run with the server down. */
 
-import type { LogBatch, ParseRequest, ParsedCommand, SayRequest, SayResponse } from '@shared/types';
+import type {
+  LogBatch,
+  ParseRequest,
+  ParsedCommand,
+  SayRequest,
+  SayResponse,
+  WishlistRequest,
+  WishlistResponse,
+} from '@shared/types';
 
 const PARSE_TIMEOUT_MS = 2500; // ack contract: ≤1.5s target, hard stop at 2.5
 const TTS_TIMEOUT_MS = 3500;
 /** Unprompted speech is ambient — it may never make the game wait. */
 const SAY_TIMEOUT_MS = 3000;
+/** The gate is already satisfied when this fires — it may fail without cost. */
+const WISHLIST_TIMEOUT_MS = 4000;
 
 async function withTimeout<T>(ms: number, fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
   const ctrl = new AbortController();
@@ -56,6 +66,24 @@ export async function apiTts(text: string, id?: string): Promise<ArrayBuffer> {
     });
     if (!res.ok) throw new Error(`tts ${res.status}`);
     return await res.arrayBuffer();
+  });
+}
+
+/**
+ * Best-effort persistence for the end-of-run email gate. Throws on any failure —
+ * the caller (game/wishlist.ts) lets the player through regardless and stashes
+ * the address for a later session to retry.
+ */
+export async function apiWishlist(req: WishlistRequest): Promise<WishlistResponse> {
+  return withTimeout(WISHLIST_TIMEOUT_MS, async (signal) => {
+    const res = await fetch('./api/wishlist', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (!res.ok) throw new Error(`wishlist ${res.status}`);
+    return (await res.json()) as WishlistResponse;
   });
 }
 
