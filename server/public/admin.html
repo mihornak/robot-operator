@@ -840,12 +840,12 @@
       const tip = makeTip(bars);
 
       /**
-       * A funnel must never widen. It can, in the data: `signups` counts
-       * `wishlist_submit` while `sawGate` counts `wishlist_shown`, so a batch of
-       * shown-events lost to a closing tab leaves a later step with a higher
-       * count than the step above it. The bar is clamped to its predecessor and
-       * the readout says so; the printed count stays exactly what the server
-       * sent, because hiding the number would be the actual dishonesty.
+       * A funnel must never widen. The server now guarantees it won't — `sawGate`
+       * is the union of shown and submit sessions, so `signups` cannot exceed it
+       * — but that guarantee lives in another process and this is one line of
+       * arithmetic. The bar is clamped to its predecessor and the readout says
+       * when it was; the printed count stays exactly what the server sent,
+       * because hiding the number would be the actual dishonesty.
        */
       let ceiling = 100;
       const step = (label, value, opts) => {
@@ -884,19 +884,17 @@
       }
 
       /**
-       * The conversion rate is NOT recomputed from `signups / sawGate`. Those
-       * two have different numerators on purpose: `signups` is every submit,
-       * while `conversionPct` counts only submits that can be matched to a gate
-       * view — the bounded, audited number, and the one the tile shows. Deriving
-       * it here again would put two different figures for the same thing side by
-       * side on one screen.
+       * The rate comes from `conversionPct` rather than dividing the two counts
+       * again here. They agree by construction — the server defines it as
+       * `signups / sawGate` — but the tile beside this row prints the server's
+       * number, and two independent derivations of one figure is how they drift.
        */
       const conv = typeof o.conversionPct === 'number' ? o.conversionPct : null;
       bars.appendChild(step('Signed up', o.signups,
         conv != null
           ? {
-              prev: `${conv.toFixed(0)}% converted`,
-              detail: `${num(o.signups)} entered · ${conv.toFixed(1)}% of gate views converted`,
+              prev: `${conv.toFixed(0)}% of asked`,
+              detail: `${num(o.signups)} entered · ${conv.toFixed(1)}% of those asked`,
             }
           : sawGate != null
             ? { prev: '—' }
@@ -906,7 +904,9 @@
       const notes = [
         h('p', { class: 'panel-note', text: 'Bar width is share of all sessions. The number on the right is the drop from the step above.' }),
       ];
-      if (conv != null) {
+      // SAW GATE is the one step whose label doesn't explain itself, so it gets
+      // the caption — and it belongs to that step, not to the conversion rate.
+      if (sawGate != null) {
         notes.push(h('p', {
           class: 'panel-note',
           text: 'SAW GATE counts sessions that reached an end frame AND were actually asked — a returning player who already left an address is let straight through, which is why it sits below DIED plus FINISHED.',
