@@ -16,7 +16,7 @@
  */
 
 import type { WishlistRequest } from '@shared/types';
-import { apiWishlist } from '../net/api';
+import { apiWishlist, logEvent } from '../net/api';
 
 const STORE_KEY = 'robot-operator:wishlist';
 const PENDING_KEY = 'robot-operator:wishlist-pending';
@@ -307,6 +307,10 @@ export class WishlistGate {
     if (this.satisfied) return Promise.resolve();
     this.ctx = ctx;
     this.build();
+    // The conversion denominator. Sessions that reached an end frame but were
+    // already satisfied never see the gate, so counting deaths would understate
+    // the rate — this counts only the players who were actually asked.
+    logEvent('wishlist_shown', { floor: ctx.floor });
     this.pending = new Promise<void>((res) => {
       this.settle = res;
     });
@@ -467,6 +471,7 @@ export class WishlistGate {
     const email = this.field.value.trim().toLowerCase();
     if (email.length > MAX_EMAIL || !EMAIL_RE.test(email)) {
       this.refuse();
+      logEvent('wishlist_refused', { floor: this.ctx.floor });
       return;
     }
 
@@ -485,6 +490,10 @@ export class WishlistGate {
       ...(this.ctx.robotName ? { robotName: this.ctx.robotName } : {}),
     };
     writeRaw(PENDING_KEY, JSON.stringify({ ...req, at })); // send() clears it on success
+    // Ties this signup to the session that earned it, which is the only way the
+    // funnel can say "of the players who saw the gate, this many left an
+    // address". The address itself never goes into telemetry — only the fact.
+    logEvent('wishlist_submit', { floor: this.ctx.floor });
 
     const started = Date.now();
     await Promise.race([send(req), delay(MAX_SEND_MS)]);

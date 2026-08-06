@@ -13,6 +13,8 @@ import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import type { ParseRequest, SayRequest } from '../../shared/types';
+import { registerAdminRoutes } from './adminRoute';
+import { recordEvents } from './analytics';
 import { parseUtterance } from './parse';
 import { sayLine } from './say';
 import { parseRequestSchema, sayRequestSchema, wishlistRequestSchema } from './schema';
@@ -31,6 +33,7 @@ app.get('/api/health', (c) =>
     llm: Boolean(process.env.OPENROUTER_API_KEY),
     tts: Boolean(process.env.ELEVENLABS_API_KEY),
     db: Boolean(process.env.DATABASE_URL),
+    admin: Boolean(process.env.ADMIN_TOKEN),
   }),
 );
 
@@ -132,8 +135,24 @@ app.post('/api/log', async (c) => {
   } catch {
     /* telemetry must never fail the client */
   }
+  // The durable copy. Not awaited, never throws, no-op without DATABASE_URL —
+  // the 204 above this line is the client's whole contract and it holds even
+  // with the database on fire.
+  recordEvents(parsed.data.session, parsed.data.events);
   return c.body(null, 204);
 });
+
+// The read-only ops surface. Registered before the static catch-all, and closed
+// (501) unless ADMIN_TOKEN is set — see adminRoute.ts.
+registerAdminRoutes(app, { adminToken: process.env.ADMIN_TOKEN?.trim() || null });
+
+/** The dashboard page itself. It lives outside `client/dist` because it is not
+ *  part of the game bundle, and it carries no secret — the operator pastes the
+ *  token into it, and every number behind it is gated by the API above. */
+app.get(
+  '/admin',
+  serveStatic({ path: relative(process.cwd(), join(SERVER_DIR, 'public', 'admin.html')) }),
+);
 
 // Production: serve the built client. Dev uses the vite proxy instead.
 if (existsSync(CLIENT_DIST)) {

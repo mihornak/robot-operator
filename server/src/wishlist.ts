@@ -53,7 +53,9 @@ function needsTls(url: string): boolean {
   return host !== 'localhost' && host !== '127.0.0.1' && host !== '::1';
 }
 
-function getPool(): Pool | null {
+/** The one pool in the process. Railway's free Postgres has a low connection
+ *  cap, so analytics.ts and adminRoute.ts borrow this rather than open their own. */
+export function getPool(): Pool | null {
   const url = process.env.DATABASE_URL;
   if (!url) return null;
   if (!pool) {

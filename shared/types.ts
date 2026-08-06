@@ -852,3 +852,87 @@ export interface WishlistResponse {
   /** False when the server has no database and only wrote a log line. */
   stored: boolean;
 }
+
+// ---------------------------------------------------------------- analytics
+
+/**
+ * The read side of the durable analytics store, backing `/admin`.
+ *
+ * Every client event already flows through `/api/log`; the server dual-writes
+ * it into Postgres so the answers survive a redeploy (Railway's disk does not).
+ * These shapes are the contract between server/src/adminRoute.ts and the
+ * dashboard page — the game bundle never imports them.
+ */
+export interface AdminOverview {
+  /** Window this covers, in days back from now. */
+  days: number;
+  /** Distinct sessions that loaded the page at all. */
+  sessions: number;
+  /** …that got past the title screen and booted the feed. */
+  booted: number;
+  /** …that issued at least one command. The real "tried it" number. */
+  played: number;
+  /** …that died at least once. */
+  died: number;
+  /** …that reached the ending card. */
+  finished: number;
+  /** Deepest floor reached, per session, bucketed: floor → session count. */
+  depth: Array<{ floor: number; sessions: number }>;
+  /** Mean and median deepest floor across sessions that played. */
+  avgFloor: number | null;
+  medianFloor: number | null;
+  /**
+   * Sessions that were asked for an address — the conversion denominator.
+   *
+   * The UNION of `wishlist_shown` and `wishlist_submit` sessions, not just
+   * `wishlist_shown`. A submit is only reachable from an open gate, so a submit
+   * with no matching shown means the gate WAS shown and the event was lost in a
+   * dropped beacon batch. Counting the union keeps the funnel monotonic —
+   * `signups` can never exceed `sawGate` — without discarding known-good data.
+   */
+  sawGate: number;
+  /**
+   * Sessions that entered a valid address, from `wishlist_submit` events.
+   * This is the funnel number: it counts players who completed the gate.
+   */
+  signups: number;
+  signupsAllTime: number;
+  /**
+   * Rows actually in the `wishlist` table. Deliberately separate from
+   * `signups`: the gate logs its event BEFORE the POST and the POST is
+   * fail-soft, so a player can leave an address that never reaches Postgres.
+   * `signups` > `addressesStored` is not a bug — it is the delivery gap, and
+   * seeing it is the point.
+   */
+  addressesStored: number;
+  /**
+   * `signups / sawGate` as a percentage 0..100, null when the gate has never
+   * been shown. Deliberately NOT signups over end-frames: a returning player is
+   * already satisfied from localStorage and never sees the gate, so that
+   * denominator would understate the rate.
+   */
+  conversionPct: number | null;
+  /** One row per day, oldest first. */
+  daily: Array<{ day: string; sessions: number; played: number; signups: number }>;
+}
+
+/** One row of the recent-sessions drill-down. */
+export interface AdminSession {
+  session: string;
+  firstSeen: string;
+  lastSeen: string;
+  /** Deepest floor reached, or null if they never got moving. */
+  maxFloor: number | null;
+  commands: number;
+  deaths: number;
+  /** True when this session's player left an address. */
+  signedUp: boolean;
+}
+
+/** One wishlist signup, for the list and the CSV export. */
+export interface AdminSignup {
+  email: string;
+  floor: number | null;
+  robotName: string | null;
+  createdAt: string;
+}

@@ -1,10 +1,16 @@
 # server — Hono API on :8790 (`PORT` env)
 
-- Run: `pnpm dev` (tsx watch; loads `../.env`: `OPENROUTER_API_KEY`, `ELEVENLABS_API_KEY`, optional `ELEVENLABS_VOICE_ID`, `DATABASE_URL`, `PORT`).
+- Run: `pnpm dev` (tsx watch; loads `../.env`: `OPENROUTER_API_KEY`, `ELEVENLABS_API_KEY`, optional `ELEVENLABS_VOICE_ID`, `DATABASE_URL`, `ADMIN_TOKEN`, `PORT`).
 - `POST /api/parse` ParseRequest → ParsedCommand (OpenRouter gemini-2.5-flash-lite, 1.8s deadline, keyword fallback `source:'local'` — never 500s for parseable input).
 - `POST /api/say` SayRequest → SayResponse — the unprompted mouth (OpenRouter gemini-2.5-flash, 2.6s deadline, local line bank `source:'local'` on any miss). Speech and at most a proposal; never moves the robot.
 - `POST /api/tts` `{text}` → audio/mpeg (eleven_flash_v2_5; disk cache `.cache/tts/`; 503 no key, 504 timeout).
 - `POST /api/wishlist` WishlistRequest → WishlistResponse (Postgres upsert on `email`, table created on first use from `sql/001_wishlist.sql`). 400 only for a body that is not an email; a missing or broken `DATABASE_URL` degrades to `stored:false` + a JSONL line in `logs/wishlist-YYYYMMDD.jsonl` — never 500s, because a dead database must not trap a player behind the restart gate.
-- `POST /api/log` LogBatch → 204 (JSONL to `logs/events-YYYYMMDD.jsonl`); `GET /api/health` → `{ok,llm,tts,db}`.
-- `DATABASE_URL` is optional. TLS is skipped for `*.railway.internal` and localhost, and `rejectUnauthorized:false` everywhere else (managed-Postgres certs are not ours to verify).
+- `POST /api/log` LogBatch → 204 (JSONL to `logs/events-YYYYMMDD.jsonl`, plus one multi-row INSERT into `events` — table created on first use from `sql/002_events.sql`). The insert is never awaited and never throws: the 204 holds with the database absent, down, or wrong, and Railway's disk does not survive a redeploy but the table does.
+- `GET /api/health` → `{ok,llm,tts,db,admin}`.
+- `GET /api/admin/overview?days=30` → `AdminOverview` — sessions, funnel (booted → played → died → finished), depth histogram, mean/median floor, signups, and one row per day. `days` clamped 1..365. Conversion is `wishlist_submit / (wishlist_shown ∪ wishlist_submit)`, both session-scoped — a returning player is satisfied from `localStorage` and never sees the form, so scoring against every session that ended a run would understate the rate. The denominator is the union because a submit is proof the gate was open: an event batch lost to a closing tab must not produce a signup the funnel cannot account for.
+- `GET /api/admin/sessions?limit=50` → `AdminSession[]` — the recent-sessions drill-down, newest last-seen first. `limit` clamped 1..1000.
+- `GET /api/admin/wishlist?limit=200` → `AdminSignup[]`; `GET /api/admin/wishlist.csv` → the whole list as `text/csv`.
+- `GET /admin` serves `public/admin.html`, the dashboard those four back. The page itself is public and holds no secret — the operator pastes the token into it.
+- `ADMIN_TOKEN` guards all four. `Authorization: Bearer <token>` ONLY — never a query param, which would put the secret in every access log. Unset → the whole `/api/admin/*` surface answers **501**, so a deploy that forgets the variable is closed rather than silently open. No `DATABASE_URL` → **503**, so the dashboard can say "no database" instead of drawing zeroes that look like real numbers. Wrong or missing token → **401**, with no hint which.
+- `DATABASE_URL` is optional. One `pg` Pool for the whole process (`max: 4` — Railway's free Postgres has a low connection cap), shared by wishlist, events, and the admin reads. TLS is skipped for `*.railway.internal` and localhost, and `rejectUnauthorized:false` everywhere else (managed-Postgres certs are not ours to verify).
 - Serves `../client/dist` at `/` when built (dev uses the vite proxy).
