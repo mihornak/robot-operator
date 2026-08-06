@@ -9,6 +9,7 @@ import { TILE } from '@shared/types';
 import { ART, type ArtName } from '@shared/artManifest';
 import { makeRng } from '@shared/rng';
 import { FxSystem } from './fx';
+import { MarkerLayer } from './markers';
 import { RobotView } from './robot';
 import { anchorOf, frames, glowTex, hashStr, Interp, lerpColor, tex } from './util';
 
@@ -31,11 +32,15 @@ const CHIP_SCALE = 1.9;
 /** Contact-shadow footprint per grounded entity: [w, h, yOffset]. */
 const SHADOW: Partial<Record<Entity['kind'], readonly [number, number, number]>> = {
   fusedPrinter: [20, 7, 8],
+  fusedShredder: [32, 11, 12], // a 34px body with no footprint reads as floating
   printerInnocent: [15, 6, 6],
   crate: [30, 10, 12], // scaled up with the body — a big crate needs a big footprint
   debris: [42, 11, 5],
   fuse: [7, 3, 4],
   chip: [9, 4, 4],
+  // The chair's castors are two pixels of dark on a dark floor; the shadow is
+  // what actually grounds it. Narrow — a chair sits on a star base, not a slab.
+  chair: [13, 5, 3],
 };
 
 const KIND_ART: Record<Entity['kind'], ArtName> = {
@@ -45,8 +50,10 @@ const KIND_ART: Record<Entity['kind'], ArtName> = {
   crate: 'crate',
   cable: 'cable',
   fusedPrinter: 'fused_printer',
+  fusedShredder: 'fused_shredder',
   printerInnocent: 'printer_innocent',
   mop: 'mop',
+  chair: 'office_chair',
   fuse: 'fuse',
   fuseSocket: 'fuse_socket',
   elevatorA: 'elevator',
@@ -82,6 +89,7 @@ export class WorldView {
   readonly container = new Container();
   readonly robot: RobotView;
   readonly fx: FxSystem;
+  readonly markers = new MarkerLayer();
 
   private tiles = new Container();
   private entLayer = new Container();
@@ -118,7 +126,17 @@ export class WorldView {
     this.robotShadow.scale.set(20 / 32, 8 / 32);
     this.robotShadow.alpha = 0.32;
     this.entLayer.addChild(this.robotShadow);
-    this.container.addChild(this.tiles, this.entLayer, this.moteLayer, this.projLayer, this.fx.container);
+    // Impact markers sit strictly between the floor and the bodies: the robot
+    // and the boss stand IN the circle, never under it. A marker that occludes
+    // the robot defeats the only thing the marker is for.
+    this.container.addChild(
+      this.tiles,
+      this.markers.container,
+      this.entLayer,
+      this.moteLayer,
+      this.projLayer,
+      this.fx.container,
+    );
   }
 
   // --------------------------------------------------------------- events
@@ -143,11 +161,46 @@ export class WorldView {
       case 'enemy_hit': {
         const v = ev.id ? this.views.get(ev.id) : undefined;
         if (v) v.flashMs = 90;
+        // A tint alone gave a hit no WEIGHT: on a 34px boss that soaks dozens of
+        // them you could not tell a landed shot from a miss, which made the
+        // whole fight read as unresponsive. Sparks off the plating say "that
+        // connected" without pretending a bolt is an explosion.
+        const e = ev.id ? this.findEntity(view, ev.id) : undefined;
+        if (e) {
+          const big = e.kind === 'fusedShredder';
+          this.fx.spark(e.pos.x, e.pos.y - 2, big ? 6 : 3);
+          if (big) {
+            // Only the boss sheds parts per hit. On a printer that dies in three
+            // shots it would look like it was already coming apart.
+            this.fx.part(e.pos.x, e.pos.y - 4, tex(this.art, 'part_plate'), 0x6a6f76);
+            this.fx.flashPool(e.pos.x, e.pos.y - 2, 26, 70);
+          }
+        }
+        break;
+      }
+      // Every AoE detonation — boss mortar AND robot rocket. `explode()` emits
+      // one of these with the impact point, so the visual lands exactly where
+      // the damage did rather than where a sprite happened to be.
+      case 'mortar_impact': {
+        const x = Number(ev.data?.x ?? 0);
+        const y = Number(ev.data?.y ?? 0);
+        this.fx.burstMed(x, y);
+        this.fx.flashPool(x, y, 90, 200);
         break;
       }
       case 'enemy_death': {
         const e = ev.id ? this.findEntity(view, ev.id) : undefined;
-        if (e) {
+        if (!e) break;
+        if (e.kind === 'fusedShredder') {
+          // The one and only burstHuge in the game. A boss that dies with the
+          // same pop as the printers it was printing is a boss that was never
+          // worth the fight.
+          this.fx.burstHuge(e.pos.x, e.pos.y - 6);
+          for (let i = 0; i < 8; i++) {
+            this.fx.part(e.pos.x, e.pos.y - 8, tex(this.art, 'part_plate'), 0x6a6f76);
+            this.fx.part(e.pos.x, e.pos.y - 6, tex(this.art, 'paper'), 0x8a8d90);
+          }
+        } else {
           this.fx.boom(e.pos.x, e.pos.y - 4);
           this.fx.part(e.pos.x, e.pos.y - 6, tex(this.art, 'part_plate'), 0x6a6f76);
           this.fx.part(e.pos.x, e.pos.y - 6, tex(this.art, 'paper'), 0x8a8d90);
@@ -242,6 +295,7 @@ export class WorldView {
     this.robotShadow.visible = !sim.robot.dormant;
     this.robotShadow.position.set(this.robot.container.x, this.robot.container.y + 6);
     this.robotShadow.zIndex = this.robot.container.zIndex - 0.5;
+    this.markers.update(sim.mortars, dt);
     this.fx.update(dt);
     this.updateMotes(dt);
   }
@@ -253,6 +307,7 @@ export class WorldView {
     this.closing.clear();
     this.elevBRamp = -1;
     this.fx.clear();
+    this.markers.clear();
     for (const m of this.motes) {
       m.sp.visible = false;
       this.motePool.push(m.sp);
@@ -781,7 +836,8 @@ export class WorldView {
         this.updateElevator(e, v, dt, t);
         break;
       case 'mop':
-        break;
+      case 'chair':
+        break; // furniture. It sits there. That is the whole joke.
     }
 
     v.lastX = x;

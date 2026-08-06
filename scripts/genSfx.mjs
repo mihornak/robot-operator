@@ -42,6 +42,14 @@ const SFX = {
   spin: ['happy little robot spinning in place, servo whirr with wobble', 1.2],
   fuse_in: ['heavy electrical fuse slotting in, clunk, power hum rising', 1.5],
   title: ['ominous warm synth swell sting, short, cinematic', 3],
+  mortar_launch: ['hollow metallic thump, projectile launched, rising whistle away', 1.2],
+  mortar_warn: ['two short urgent electronic warning beeps, dry, close', 0.7],
+  boom_small: ['small dry explosion, dusty debris, no fire, concrete room', 1],
+  boom_big: ['big dry explosion, paper and toner burst, debris rain, no fire', 1.8],
+  boom_huge: ['huge machine detonation, deep boom, metal tearing, long debris tail', 3],
+  rocket_fire: ['rocket launcher fires, sharp hiss and whoosh, mechanical', 0.8],
+  boss_roar: ['huge industrial paper shredder screams, grinding metal, menacing', 2.5],
+  alarm: ['facility klaxon, two-tone alarm, distant concrete corridor', 2],
 };
 
 // guard: prompt map must match the SfxName union in shared/types.ts

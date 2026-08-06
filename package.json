@@ -7,6 +7,7 @@
     "build": "pnpm --filter client build",
     "start": "pnpm --filter server start",
     "check": "pnpm --filter client check && pnpm --filter server check",
+    "sprites": "node tools/render-sprites.mjs",
     "selftest": "node --experimental-strip-types --no-warnings client/src/sim/selftest-run.ts",
     "fuzz": "node --experimental-strip-types --no-warnings client/src/sim/fuzz-run.ts",
     "test": "pnpm check && pnpm selftest && pnpm fuzz"

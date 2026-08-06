@@ -1,0 +1,13 @@
+{
+  "source": "office_chair.glb",
+  "size": [
+    16,
+    20
+  ],
+  "yaw": 0.0,
+  "elev": 45.0,
+  "anchor": [
+    0.5,
+    0.799
+  ]
+}

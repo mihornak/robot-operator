@@ -88,6 +88,18 @@ const GLYPHS: Record<ModuleId, readonly string[]> = {
     '..X.X...',
     '...X....',
   ],
+  // Nose up, fins out, exhaust under. The one module that is a WEAPON, so it
+  // has to read as ordnance at a glance and not as another abstract bulb.
+  ROCKET: [
+    '...X....',
+    '..XXX...',
+    '..X.X...',
+    '..XXX...',
+    '.XXXXX..',
+    '.X.X.X..',
+    '...X....',
+    '..X.X...',
+  ],
 };
 
 export function glyphDrawer(id: ModuleId): Drawer {

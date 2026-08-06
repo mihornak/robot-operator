@@ -99,9 +99,81 @@ const innocent = (id: string, pos: Vec): Entity => ({
   state: 'idle',
 });
 const mop = (id: string, pos: Vec): Entity => ({ id, kind: 'mop', pos, hp: 1, maxHp: 1, label: 'mop' });
+/** Office chair. Furniture the staff left behind — mop rules: harmless, named,
+ *  shootable, and worth walking over to look at. Its sprite is the one baked
+ *  from a 3D model (`tools/sprites.json`) rather than drawn by hand. */
+const chair = (id: string, pos: Vec): Entity => ({ id, kind: 'chair', pos, hp: 1, maxHp: 1, label: 'office chair' });
 const fuse = (id: string, pos: Vec): Entity => ({ id, kind: 'fuse', pos, label: 'fuse' });
 // Label must NOT contain "fuse" — "grab the fuse" would mis-target the socket.
 const socket = (id: string, pos: Vec): Entity => ({ id, kind: 'fuseSocket', pos, label: 'power socket', state: 'empty' });
+
+/**
+ * Boss hull. Long enough for the fight to have phases, short enough that the
+ * last floor stays a set-piece and never becomes a grind.
+ *
+ * 96, up from 24, and the reason is the one number that made the fight not a
+ * fight: a robot arriving here with ZAP (damage 2, 16-tick cooldown) empties 24
+ * hp in TWELVE bolts — 202 ticks, 3.4 seconds, phase 1 through phase 3 crossed
+ * inside a single held breath. The three-phase structure existed in the source
+ * and never once on the screen. At 96 the same robot needs ~13 seconds of
+ * uninterrupted fire, which is 25–40 seconds once the mortars make it stop
+ * firing and move, and every phase is something the player lives through
+ * instead of a line in a changelog.
+ *
+ * bossPhase() divides by maxHp, so the thresholds ride this number for free:
+ * phase 1 is hp 64–96, phase 2 is 32–63, phase 3 is 31 down. Nothing else needs
+ * touching to move it again.
+ */
+const BOSS_HP = 96;
+/**
+ * THE SHREDDER — a cross-cut shredder fused onto a floor-scrubber chassis.
+ * Starts 'dormant', which is not a costume: isLiveHostile excludes it, so
+ * until something stands it up the boss is scenery in every scan the sim runs.
+ *
+ * The label must stay phonetically clear of "printer". Both parsers map
+ * machine/enemy/monster/thing/baddie → fusedPrinter through KIND_SYNONYMS, so a
+ * boss with "printer" anywhere in its name is a boss the operator cannot name.
+ */
+const shredder = (id: string, pos: Vec): Entity => ({
+  id,
+  kind: 'fusedShredder',
+  pos,
+  hp: BOSS_HP,
+  maxHp: BOSS_HP,
+  label: 'shredder',
+  state: 'dormant',
+  facing: 'left',
+  ai: {},
+});
+/**
+ * An add, built by the SHREDDER mid-fight rather than laid out by this file.
+ *
+ * The four printers that used to be propped against the corners were a lie the
+ * player only fell for once: dead scenery on arrival, all four standing up on
+ * one frame at phase two, and then never any more of them for the rest of the
+ * fight. The room's pressure was a step function with exactly one step in it.
+ * The boss now prints one every five seconds (`SPAWN_EVERY` in boss.ts) out of
+ * its own body, which is both a threat that grows while you dither and a thing
+ * the player can SEE the source of — the answer to "where do they keep coming
+ * from" is standing in the middle of the room taking bolts.
+ *
+ * Exported because boss.ts is the only caller: the floor still owns what an add
+ * IS (kind, label, hp), the boss owns when and where one appears.
+ *
+ * hp 3, unchanged from the propped-up version. An add is a nuisance to be
+ * shoved through or ignored, not a second boss — the whole reason the operator
+ * gets to say "LEAVE THEM, SHOOT THE BIG ONE" and be right.
+ */
+export const bossAdd = (id: string, pos: Vec): Entity => printer(id, pos, 3);
+/** The one upgrade on the boss floor — and the reason to cross the room while
+ *  something is dropping mortars on it. */
+const rocketCrate = (pos: Vec): Entity => ({
+  id: 'crate_ROCKET',
+  kind: 'crate',
+  pos,
+  label: 'rocket crate',
+  state: 'closed',
+});
 
 // ---------------------------------------------------------------- floors
 
@@ -148,6 +220,11 @@ const FLOOR_OPENING: FloorDef = {
     debris('pile2', at(6, 14)),
     scrap('scrap1', at(24, 5)),
     scrap('scrap2', at(7, 6)),
+    // Off the A→B line, close enough to the pile to be in frame with it. One
+    // piece of furniture in a room full of dead machines says "people worked
+    // here" louder than another heap does — and gives the robot something to
+    // misidentify on the floor where it has no enemies to misidentify instead.
+    chair('chair1', at(11, 6)),
     debris('pile3', at(10, 12)),
     debris('pile4', at(23, 13)),
     debris('pile5', at(19, 10)),
@@ -195,8 +272,10 @@ const FLOOR_MEMORY: FloorDef = {
     // rows deep, so a chip parked on either row has a wall within the robot's
     // body radius and cannot be driven onto.
     chip('chip_memory', at(14, 7.5), 'MEMORY'), // a lap round the island, not a detour
-    scrap('scrap1', at(7, 3)),
-    scrap('scrap2', at(22, 12)),
+    // NO SCRAP. There was a piece in each far corner, and between the pickup
+    // barks, the gather self-orders and the explore callouts they buried the
+    // one line this floor exists to deliver. A floor with a single idea should
+    // contain a single thing worth remarking on.
   ],
 };
 
@@ -355,6 +434,88 @@ const FLOOR_GAUNTLET: FloorDef = {
 };
 
 /**
+ * THE SHREDDER. A right, B left and DARK, and the thing that ate this floor
+ * parked in the middle of the only straight line between them.
+ *
+ * The doors open on a room that is not doing anything. A slumped hulk in the
+ * centre, a pile of scrap, somebody's office chair. The operator's first job is
+ * to be wrong about all of it, and the robot will help: the shredder spawns
+ * 'dormant', which is scenery by contract, so it reports junk because junk is
+ * what it is looking at.
+ *
+ * Then the hulk stands up, and the job turns into triage one sentence at a
+ * time. "GO TO THE LIFT" gets answered by the lift — elevator B is dark until
+ * the shredder stops moving, and the robot says so. So the fight is not a rule
+ * the game imposes; it is the only door left. What is left to say is WHERE TO
+ * STAND. The mortars paint their circles on the ground before they land, which
+ * makes "MOVE" and "GET BEHIND SOMETHING" the whole vocabulary of phase one —
+ * and the six stanchions are STAGGERED, not gridded like floor 1, so "behind
+ * something" is a judgement about which diagonal rather than a thing the
+ * operator reads off the map once and reuses.
+ *
+ * Both outer lanes run unbroken end to end and the robot outruns the boss, so
+ * "JUST RUN" is always a real answer. That is deliberate. It is what makes
+ * standing and fighting a decision the operator makes instead of one the room
+ * makes for them. The rocket crate sits down in the bottom lane, far enough
+ * from the doors that going to get it is a trip taken under fire.
+ *
+ * Then it starts printing. One add every five seconds, out of the shredder's
+ * own body, capped so the room stays readable — and that is what turns the
+ * middle of the fight into a triage problem. The operator stops picking cover
+ * and starts picking TARGETS: "SHOOT THE BIG ONE", "LEAVE THEM, KEEP MOVING".
+ * The adds are a tax on hesitation and they never stop coming, so the answer to
+ * them is never "clear the room", it is "kill the thing making them".
+ * Killing the shredder lights elevator B — and because the director ends the
+ * run at five floors cleared, stepping into it fires the cliffhanger. The
+ * trailer finishes on the doors closing.
+ *
+ * Trailer-only: appended after the authored five and reached by `?floor=6`, so
+ * the shipping run is untouched by everything above.
+ */
+const FLOOR_BOSS: FloorDef = {
+  map: [
+    '##############################',
+    '#............................#',
+    '#............................#',
+    '#............................#',
+    '#....##.....##........##.....#',
+    '#....##.....##........##.....#',
+    '#............................#',
+    '#............................#',
+    '#............................#',
+    '#............................#',
+    '#.......##......##......##...#',
+    '#.......##......##......##...#',
+    '#............................#',
+    '#............................#',
+    '#............................#',
+    '##############################',
+  ],
+  entities: () => [
+    // Both doors sit on the centre line of the plaza, which is what puts the
+    // boss literally between the robot and the exit rather than merely near it.
+    elevA(at(27, 7.5)),
+    elevB(at(2, 7.5), true), // dark until the shredder stops moving
+    shredder('boss1', at(15, 7.5)),
+    // Bottom lane, well off the A→B line: reaching it is a trip, and a trip is
+    // the only kind of errand worth giving during a fight.
+    rocketCrate(at(20, 13)),
+    // NO ADDS ARE AUTHORED HERE. The shredder prints its own, one every five
+    // seconds, out of its own body — see `bossAdd` above and SPAWN_EVERY in
+    // boss.ts. Four printers propped in the corners meant the room's pressure
+    // was fixed the moment the doors opened; a boss that keeps making more
+    // means dithering costs something and killing it is the only way to stop
+    // the tide. It also puts the source on screen: they come out of the thing
+    // you are supposed to be shooting.
+    // Dressing. The chair is the one thing in here that a person sat in, and
+    // it is parked where the robot will drive past it on the way to elevator B.
+    chair('chair1', at(10, 9)),
+    debris('pile1', at(12, 9)),
+    debris('pile2', at(19, 6)),
+  ],
+};
+
+/**
  * THE RUNNING ORDER. Index 0 is floor 1.
  *
  * The ramp is deliberately gentle at the front: wake up, then a room whose
@@ -365,6 +526,11 @@ const FLOOR_GAUNTLET: FloorDef = {
  * Anything keyed by FLOOR NUMBER lives elsewhere and has to move with this:
  * `TRIADS` in shared/content.ts (the ceremony floor), and `PINNED_IDS` in
  * sim/selftest.ts (indexed by floor). The selftest checks both.
+ *
+ * The boss floor is APPENDED, never inserted. The director ends the run at
+ * five floors cleared, so index 5 is off the end of the authored arc by
+ * construction: it is reachable only by `?floor=6`, and nothing before it
+ * changes because it exists.
  */
 export const FLOORS: FloorDef[] = [
   FLOOR_OPENING, // 1 — wake up
@@ -372,6 +538,7 @@ export const FLOORS: FloorDef[] = [
   FLOOR_MOVEMENT, // 3 — two doors, one bites
   FLOOR_GAUNTLET, // 4 — fuse, socket, and the first real fight
   FLOOR_FIRST_MACHINE, // 5 — sharper ears, and a machine to use them on
+  FLOOR_BOSS, // 6 — the shredder; trailer-only, off the end of the run
 ];
 
 /** Parse an ASCII map into the walkability grid. Throws on malformed maps. */

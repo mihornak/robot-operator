@@ -71,6 +71,7 @@ export const MODULES: Record<ModuleId, { name: string; blurb: string }> = {
   TOUGH: { name: 'TOUGH', blurb: CHIPS.TOUGH.blurb },
   EARS: { name: 'EARS', blurb: 'Hears further. Notices more.' },
   BRAIN: { name: 'BRAIN', blurb: 'Has ideas. Makes plans.' },
+  ROCKET: { name: 'ROCKET', blurb: 'Big pew pew. Blows things up.' },
 };
 
 /**

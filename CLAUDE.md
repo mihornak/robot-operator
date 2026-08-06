@@ -17,13 +17,22 @@ Read `GAME_SPEC.md` (systems) and `FIRST_MINUTES.md` (feel; wins on feel).
 7. **Toddler-speak bible** for every robot line: third person ("ROBOT…", never "I"), ≤7 words, no subordinate clauses, overconfident never sad, misapplied abstractions ("WALL IS RUDE").
 8. **TTS:** `eleven_flash_v2_5` only, NO audio tags, ever. Fail-soft chain: realtime → bank generic → caption-only. Zero keys = fully playable with captions.
 9. All cross-subsystem contracts live in `shared/types.ts` + `shared/artManifest.ts`. Do not invent parallel types; extend there.
+10. **3D is a build-time tool, never a runtime one.** Bought models (Fab, Unity
+    Asset Store, Superhive) are welcome as *sources* — `pnpm sprites` bakes them
+    to pixels through headless Blender at a fixed 45° ortho projection and the
+    world palette. What ships is a PNG, indistinguishable from the hand-drawn
+    art beside it. Three reasons, in order: the fixed camera can't use a live
+    renderer, three.js + a glTF loader would break the pixel-art lock and the
+    bundle budget, and asset licences let you ship a model inside a product —
+    a web build hands players the `.glb` itself. Sources stay in `art-src/`,
+    gitignored, off the wire.
 
 ## Layout
 
 - `shared/` — types, intents, art manifest, rng. Imported by client (alias `@shared`) and server (relative).
 - `client/src/sim/` — deterministic sim: state, step, floors, robot behavior tree.
 - `client/src/render/` — PixiJS v8 only: stage, tilemap, sprites, CRT stack, OSD.
-- `client/src/art/` — code-drawn pixel textures (canvas → pixi textures) per `shared/artManifest.ts`.
+- `client/src/art/` — code-drawn pixel textures (canvas → pixi textures) per `shared/artManifest.ts`, plus `sprites/` (build-time 3D bakes, see rule 10).
 - `client/src/audio/` — WebAudio: sfx, voice playback (radio-processed), hum. iOS resume handling.
 - `client/src/voice/` — CommandSource impls: WebSpeech (push-to-talk), Teletype.
 - `client/src/net/` — `/api/parse`, `/api/tts`, `/api/log` client.
@@ -45,3 +54,9 @@ Read `GAME_SPEC.md` (systems) and `FIRST_MINUTES.md` (feel; wins on feel).
 - `pnpm test` — check + selftest + fuzz. Run before calling anything done.
 - `tools/level-designer.html` — draw floors in a browser, paste the exported
   `FloorDef` into `client/src/sim/floors.ts`.
+- `pnpm sprites [name…]` — bake 3D models (asset-store `.glb`/`.fbx`/`.blend`)
+  into pixel sprites via headless Blender. Jobs in `tools/sprites.json`, sources
+  in gitignored `art-src/`, output PNGs in `client/src/art/sprites/`, manifest
+  entries marked `src: 'png'`. Needs `brew install --cask blender`; without it
+  the committed sprites still build and play. **No 3D reaches the browser** —
+  no three.js, no runtime loader, no shippable model. See rule 10.

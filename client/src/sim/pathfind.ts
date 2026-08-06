@@ -154,6 +154,19 @@ function lineIsPenalised(a: Vec, b: Vec, penalty: Float64Array): boolean {
  */
 export function markPenalty(out: Float64Array, hazards: readonly Vec[], radiusTiles: number, cost: number): void {
   out.fill(0);
+  addPenalty(out, hazards, radiusTiles, cost);
+}
+
+/**
+ * markPenalty without the reset — layer a SECOND class of hazard, at its own
+ * radius and its own price, onto a grid that already has one.
+ *
+ * Blast zones need this: they are both wider and dearer than a cable, and one
+ * shared cost would either undersell the circle or overprice the sparks. Cells
+ * keep the worst of the two rather than the sum, so overlapping fields do not
+ * inflate into a phantom wall the router refuses to path through at all.
+ */
+export function addPenalty(out: Float64Array, hazards: readonly Vec[], radiusTiles: number, cost: number): void {
   for (const h of hazards) {
     const cx = Math.floor(h.x / TILE);
     const cy = Math.floor(h.y / TILE);
@@ -301,13 +314,47 @@ export function findPath(
   if (clearPath(solid, lastCell, to, radius)) raw.push({ x: to.x, y: to.y });
 
   // String pull: keep only the corners the body actually has to turn at.
+  //
+  // The shortcut test must know about `penalty` as well as about walls. A* has
+  // just paid a large detour to route around something the standing orders say
+  // to stay off — and a pull that only asks "can the body fit?" will happily
+  // straighten that detour right back through the middle of it, silently
+  // undoing the entire route decision. In a corridor the walls hide the bug
+  // (there is nothing to straighten), which is why it survived: it only shows
+  // up avoiding something standing in OPEN ground, which is exactly what a
+  // blast zone in the middle of an arena is.
+  //
+  // `shortcutOk` falls back to walls-only when EVERY candidate is penalised —
+  // a robot with no clean option still needs a path, and refusing to pull would
+  // leave it walking the raw A* staircase for no benefit.
   const out: Vec[] = [];
   let i = 0;
   while (i < raw.length - 1) {
     let j = raw.length - 1;
-    while (j > i + 1 && !clearPath(solid, raw[i], raw[j], radius)) j--;
+    while (j > i + 1 && !shortcutOk(solid, raw[i], raw[j], radius, penalty)) j--;
+    if (j === i + 1 && penalty && !clearPath(solid, raw[i], raw[j], radius)) {
+      // Not even the next cell is reachable in a straight line (a corner the
+      // raw path turns through). Take it anyway: it came out of A*, so it is
+      // walkable, and stalling here would strand the order.
+      out.push(raw[j]);
+      i = j;
+      continue;
+    }
     out.push(raw[j]);
     i = j;
   }
   return out;
+}
+
+/** May the string pull collapse a→b? Body has to fit, and the shortcut must not
+ *  cut across cells the route is paying to avoid. */
+function shortcutOk(
+  solid: boolean[][],
+  a: Vec,
+  b: Vec,
+  radius: number,
+  penalty?: Float64Array | null,
+): boolean {
+  if (!clearPath(solid, a, b, radius)) return false;
+  return !(penalty && lineIsPenalised(a, b, penalty));
 }

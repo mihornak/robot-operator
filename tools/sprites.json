@@ -1,0 +1,27 @@
+{
+  "$comment": [
+    "Build-time 3D→sprite jobs. `pnpm sprites` runs every one through Blender",
+    "(tools/render-sprite.py) and writes client/src/art/sprites/<name>.png.",
+    "",
+    "Sources live in art-src/, which is GITIGNORED on purpose: bought models",
+    "(Fab, Unity Asset Store, Superhive) are licensed to be shipped inside a",
+    "product, not republished — and a web bundle is the one build where a .glb",
+    "is a download away. The rendered sprite is a 2D derivative; the model never",
+    "leaves this machine. Everything in the bundle is code-drawn or a PNG.",
+    "",
+    "elev is fixed at 45°: that is the tilemap's projection (a 16px wall top",
+    "over a 16px wall face). Don't vary it per prop or props stop sharing a room.",
+    "",
+    "anchor lands in shared/artManifest.ts — render-sprite.py measures the",
+    "model's ground contact and prints it into <out>.json after every render."
+  ],
+  "jobs": [
+    {
+      "name": "office_chair",
+      "src": "office_chair.glb",
+      "size": "16x20",
+      "yaw": 0,
+      "cuts": "12,34,60,82,97"
+    }
+  ]
+}

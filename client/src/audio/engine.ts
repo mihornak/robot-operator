@@ -9,7 +9,55 @@ import type { AudioEngine, SfxName } from '@shared/types';
 import { FALLBACKS, Synth, brownBuffer, crackleBuffer, crushCurve, satCurve } from './synth';
 
 const DUCK_LEVEL = 0.5; // -6dB on ambient while voice plays
+const SFX_DUCK_LEVEL = 0.55; // -5dB on sfx while voice plays — dialogue is the game
 const COMPRESSOR = { threshold: -24, knee: 12, ratio: 8, attack: 0.003, release: 0.15 };
+/** Brick wall on the sfx sum only. Twenty mortars must fit under one master. */
+const SFX_LIMITER = { threshold: -10, knee: 2, ratio: 20, attack: 0.002, release: 0.1 };
+
+/**
+ * Minimum ms between full-strength plays of the same sound. Inside the gap the
+ * sound still plays, just quieter (see SFX_CROWD_GAIN) — a cluster of booms then
+ * reads as ONE big boom with texture. Dropping them makes a firefight feel
+ * broken; attenuating them makes it feel loud.
+ *
+ * Keyed off SfxName so a rename in `shared/types.ts` breaks the build here
+ * rather than silently un-throttling a sound.
+ */
+const SFX_MIN_GAP: Partial<Record<SfxName, number>> = {
+  boom_small: 45,
+  boom_big: 70,
+  boom_huge: 400,
+  mortar_launch: 40,
+  mortar_warn: 90,
+  hit: 40,
+  shoot: 30,
+  zap: 90,
+  paper: 50,
+  bump: 60,
+  enemy_die: 60,
+};
+const SFX_CROWD_GAIN = 0.45; // level for a repeat inside its gap
+
+// Runaway guard, not a mixing tool: if more than CAP_STARTS sources start inside
+// CAP_WINDOW_MS, the quietest ones are sacrificed so a bugged emitter can't
+// choke the audio thread. In normal play this never engages.
+const CAP_STARTS = 12;
+const CAP_WINDOW_MS = 100;
+
+const BLAST_FLOOR = 0.35;
+
+/**
+ * Distance falloff for blasts, 0.35..1. The floor is the point: the camera is
+ * bolted to the ceiling of the room being shelled, so a hit across the arena
+ * still has to read as happening *here*, just further away. Full strength
+ * inside `fullRangePx`, fading to the floor over the two ranges beyond it.
+ */
+export function blastGain(distPx: number, fullRangePx = 80): number {
+  if (!(distPx > 0)) return 1; // on top of us (or NaN) — no attenuation
+  const range = Math.max(1, fullRangePx);
+  const fade = Math.min(1, Math.max(0, distPx - range) / (range * 2));
+  return BLAST_FLOOR + (1 - BLAST_FLOOR) * (1 - fade) ** 1.5;
+}
 
 export class WebAudioEngine implements AudioEngine {
   private ctx: AudioContext | null = null;
@@ -18,6 +66,8 @@ export class WebAudioEngine implements AudioEngine {
   // graph nodes — all created in buildGraph(), only touched after a ctx guard
   private master!: GainNode;
   private sfxBus!: GainNode;
+  private sfxDuck!: GainNode; // voice ducking target on the sfx side
+  private sfxLimiter!: DynamicsCompressorNode; // sfx sum only — never the voice
   private voiceBus!: GainNode;
   private ambientLevel!: GainNode; // setHum target
   private ambientDuck!: GainNode; // voice ducking target
@@ -28,6 +78,9 @@ export class WebAudioEngine implements AudioEngine {
   private sfx = new Map<SfxName, AudioBuffer | 'loading' | 'missing'>();
   private voiceSrc: AudioBufferSourceNode | null = null;
   private voiceDone: (() => void) | null = null;
+
+  private lastPlayed = new Map<string, number>(); // SFX_MIN_GAP bookkeeping, ms on the audio clock
+  private starts: { t: number; vol: number }[] = []; // CAP_WINDOW_MS ring of recent starts
 
   get ready(): boolean {
     return this._ready;
@@ -56,20 +109,35 @@ export class WebAudioEngine implements AudioEngine {
   playSfx(name: SfxName, opts?: { volume?: number; rate?: number }): void {
     const ctx = this.ctx;
     if (!ctx) return;
-    this.sweeten(name, opts?.volume ?? 1);
+    const now = ctx.currentTime * 1000; // audio clock: keeps running when the tab throttles
+
+    // Repeats inside the name's gap are *coalesced*, not dropped: quieter, and
+    // without the sweetener layer, so five booms in three frames stack into one
+    // fat boom instead of five clipped ones.
+    let volume = opts?.volume ?? 1;
+    const gap = SFX_MIN_GAP[name];
+    let crowded = false;
+    if (gap !== undefined) {
+      crowded = now - (this.lastPlayed.get(name) ?? -Infinity) < gap;
+      this.lastPlayed.set(name, now);
+      if (crowded) volume *= SFX_CROWD_GAIN;
+    }
+    if (!this.admit(now, volume)) return;
+
+    if (!crowded) this.sweeten(name, volume);
     const cached = this.sfx.get(name);
     if (cached instanceof AudioBuffer) {
       const src = ctx.createBufferSource();
       src.buffer = cached;
       src.playbackRate.value = opts?.rate ?? 1;
       const g = ctx.createGain();
-      g.gain.value = opts?.volume ?? 1;
+      g.gain.value = volume;
       src.connect(g).connect(this.sfxBus);
       src.start();
       return;
     }
     if (cached === undefined) this.loadSfx(name);
-    FALLBACKS[name](new Synth(ctx, this.sfxBus, opts?.volume ?? 1));
+    FALLBACKS[name](new Synth(ctx, this.sfxBus, volume));
   }
 
   /** Rejects on decode failure — director falls back to caption-only. */
@@ -128,6 +196,27 @@ export class WebAudioEngine implements AudioEngine {
 
   // -------------------------------------------------------------- internals
 
+  /**
+   * Global start cap. Records the start and returns false only when the window
+   * is already saturated AND this sound is the quietest thing in it — the one
+   * nobody would miss. A genuinely loud event (the boss's mortar) still gets in
+   * and evicts a whisper. UI blips deliberately skip this: a dropped teletype
+   * tick reads as a bug, and they are never what saturates the window.
+   */
+  private admit(now: number, vol: number): boolean {
+    while (this.starts.length && now - this.starts[0].t > CAP_WINDOW_MS) this.starts.shift();
+    if (this.starts.length >= CAP_STARTS) {
+      let quietest = 0;
+      for (let i = 1; i < this.starts.length; i++) {
+        if (this.starts[i].vol < this.starts[quietest].vol) quietest = i;
+      }
+      if (vol <= this.starts[quietest].vol) return false;
+      this.starts.splice(quietest, 1);
+    }
+    this.starts.push({ t: now, vol });
+    return true;
+  }
+
   /** Synth layers under file-based sfx — never replaces them, only thickens. */
   private sweeten(name: SfxName, volume: number): void {
     const ctx = this.ctx;
@@ -152,18 +241,31 @@ export class WebAudioEngine implements AudioEngine {
 
   private buildGraph(ctx: AudioContext): void {
     this.master = ctx.createGain();
-    this.master.gain.value = 0.9;
+    this.master.gain.value = 0.8; // headroom for the sfx limiter to work into
     this.master.connect(ctx.destination);
 
-    // sfx bus → surveillance-speaker shelf (-3dB @ 6k) → master,
-    // plus a convolver-free 60ms slap-back "room" at very low mix
+    // sfx bus → voice duck → surveillance-speaker shelf (-3dB @ 6k) → limiter → master,
+    // plus a convolver-free 60ms slap-back "room" at very low mix.
+    // The duck sits first so the limiter sees an already-quieter signal under
+    // dialogue and stops clamping down on the sfx we just made room for.
     this.sfxBus = ctx.createGain();
+    this.sfxDuck = ctx.createGain();
     const sfxShelf = ctx.createBiquadFilter();
     sfxShelf.type = 'highshelf';
     sfxShelf.frequency.value = 6000;
     sfxShelf.gain.value = -3;
-    this.sfxBus.connect(sfxShelf);
-    sfxShelf.connect(this.master);
+    // Brick wall across the whole sfx sum: twenty simultaneous explosions used to
+    // add straight into master and clip. The VOICE never passes through here —
+    // it has its own compressor in the radio chain, and it is the one signal that
+    // must not be squashed by gunfire.
+    this.sfxLimiter = ctx.createDynamicsCompressor();
+    this.sfxLimiter.threshold.value = SFX_LIMITER.threshold;
+    this.sfxLimiter.knee.value = SFX_LIMITER.knee;
+    this.sfxLimiter.ratio.value = SFX_LIMITER.ratio;
+    this.sfxLimiter.attack.value = SFX_LIMITER.attack;
+    this.sfxLimiter.release.value = SFX_LIMITER.release;
+    this.sfxBus.connect(this.sfxDuck).connect(sfxShelf);
+    sfxShelf.connect(this.sfxLimiter).connect(this.master);
     const slap = ctx.createDelay(0.12);
     slap.delayTime.value = 0.06;
     const slapDamp = ctx.createBiquadFilter();
@@ -173,6 +275,9 @@ export class WebAudioEngine implements AudioEngine {
     slapFb.gain.value = 0.25;
     const slapWet = ctx.createGain();
     slapWet.gain.value = 0.07;
+    // Send tapped PRE-limiter and returned past it: fed post-limiter the room
+    // tone would breathe in and out with every explosion, and the walls of the
+    // arena would sound like they were moving.
     sfxShelf.connect(slap);
     slap.connect(slapDamp).connect(slapFb).connect(slap);
     slap.connect(slapWet).connect(this.master);
@@ -305,6 +410,9 @@ export class WebAudioEngine implements AudioEngine {
     if (!this.ctx) return;
     const t = this.ctx.currentTime;
     this.ambientDuck.gain.setTargetAtTime(on ? DUCK_LEVEL : 1, t, on ? 0.05 : 0.25);
+    // Same fast-down/slow-up shape as the ambient duck: the firefight gets out of
+    // the way of the line quickly, then swells back without an audible edge.
+    this.sfxDuck.gain.setTargetAtTime(on ? SFX_DUCK_LEVEL : 1, t, on ? 0.05 : 0.25);
     this.crackleGate.gain.setTargetAtTime(on ? 1 : 0, t, on ? 0.02 : 0.08);
   }
 }

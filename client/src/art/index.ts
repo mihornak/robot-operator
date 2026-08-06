@@ -1,10 +1,16 @@
 /**
- * Assembles every manifest entry into pixi Textures. Pure code drawing —
- * one offscreen canvas per frame, nearest-neighbor, no files, no fetches.
+ * Assembles every manifest entry into pixi Textures. Almost all of it is pure
+ * code drawing — one offscreen canvas per frame, nearest-neighbor.
+ *
+ * The exception is `src: 'png'` entries: sprites baked from 3D models at build
+ * time (`tools/render-sprite.py`). They arrive as data URIs compiled into the
+ * bundle, so "no files, no fetches" still holds — but an <img> has to decode,
+ * which is why `initArt` is async and why the decoded images are cached here
+ * for the otherwise-synchronous drawing paths below.
  */
 
 import { Texture } from 'pixi.js';
-import { ART, type ArtName } from '@shared/artManifest';
+import { ART, type ArtEntry, type ArtName } from '@shared/artManifest';
 import type { ArtAtlas } from '@shared/types';
 import { AMBER, G } from './palette';
 import { Px, type Drawer } from './px';
@@ -19,6 +25,7 @@ import {
 import {
   drawFusedPrinter,
   drawFusedPrinterSpit,
+  drawFusedShredder,
   drawMop,
   drawPrinterInnocent,
 } from './enemies';
@@ -36,17 +43,32 @@ import {
 } from './props';
 import {
   drawBolt,
+  drawFxBlast,
   drawFxBoom,
+  drawFxBurst,
   drawFxMuzzle,
+  drawFxShock,
   drawFxSmoke,
   drawFxSpark,
   drawPaper,
 } from './fx';
 import { glyphDrawer } from './glyphs';
+import { loadSprite } from './sprites';
 
 export { HEAD_DIRS } from './robot';
 
-const DRAWERS: Record<ArtName, Drawer> = {
+/** Manifest entries baked from a 3D model — no drawer, an image instead. */
+type PngArtName = { [K in ArtName]: (typeof ART)[K] extends { src: 'png' } ? K : never }[ArtName];
+type CodeArtName = Exclude<ArtName, PngArtName>;
+
+// `ART` is `as const`, so entries without a `src` key have no such property to
+// read — widen to the interface before asking.
+const isPng = (name: ArtName): name is PngArtName => (ART[name] as ArtEntry).src === 'png';
+
+/** Filled by initArt before anything draws; keeps drawFrame synchronous. */
+const SPRITES = new Map<PngArtName, HTMLImageElement>();
+
+const DRAWERS: Record<CodeArtName, Drawer> = {
   robot_body: drawRobotBody,
   robot_wheels: drawRobotWheels,
   robot_head: drawRobotHead,
@@ -54,6 +76,7 @@ const DRAWERS: Record<ArtName, Drawer> = {
   part_antenna: drawPartAntenna,
   fused_printer: drawFusedPrinter,
   fused_printer_spit: drawFusedPrinterSpit,
+  fused_shredder: drawFusedShredder,
   printer_innocent: drawPrinterInnocent,
   mop: drawMop,
   scrap: drawScrap,
@@ -76,6 +99,9 @@ const DRAWERS: Record<ArtName, Drawer> = {
   fx_smoke: drawFxSmoke,
   fx_muzzle: drawFxMuzzle,
   fx_boom: drawFxBoom,
+  fx_burst: drawFxBurst,
+  fx_blast: drawFxBlast,
+  fx_shock: drawFxShock,
   glyph_MAGNET: glyphDrawer('MAGNET'),
   glyph_RAGE: glyphDrawer('RAGE'),
   glyph_SCARED: glyphDrawer('SCARED'),
@@ -84,9 +110,15 @@ const DRAWERS: Record<ArtName, Drawer> = {
   glyph_TOUGH: glyphDrawer('TOUGH'),
   glyph_EARS: glyphDrawer('EARS'),
   glyph_BRAIN: glyphDrawer('BRAIN'),
+  glyph_ROCKET: glyphDrawer('ROCKET'),
 };
 
-function drawFrame(name: ArtName, frame: number): HTMLCanvasElement {
+function drawFrame(name: ArtName, frame: number): CanvasImageSource {
+  if (isPng(name)) {
+    const img = SPRITES.get(name);
+    if (!img) throw new Error(`sprite ${name} used before initArt() decoded it`);
+    return img;
+  }
   const { w, h } = ART[name];
   const canvas = document.createElement('canvas');
   canvas.width = w;
@@ -104,6 +136,12 @@ export interface PixiArtAtlas extends ArtAtlas {
 }
 
 export async function initArt(): Promise<PixiArtAtlas> {
+  // Decode the baked sprites first — everything after this point is sync, and
+  // debugSheet/drawFrame assume the images are already in hand.
+  const png = (Object.keys(ART) as ArtName[]).filter(isPng);
+  const decoded = await Promise.all(png.map(loadSprite));
+  png.forEach((name, i) => SPRITES.set(name, decoded[i]!));
+
   const cache = new Map<ArtName, Texture[]>();
   for (const name of Object.keys(ART) as ArtName[]) {
     const list: Texture[] = [];

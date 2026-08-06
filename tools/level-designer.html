@@ -99,7 +99,7 @@
 
 <header>
   <h1>ROBOT OPERATOR<small>LEVEL DESIGNER</small></h1>
-  <select id="preset" title="Load one of the five shipping floors"></select>
+  <select id="preset" title="Load one of the shipping floors"></select>
   <button id="btnLoadPreset">Load</button>
   <button id="btnNew">New</button>
   <div class="sep"></div>
@@ -107,10 +107,11 @@
   <div class="sep"></div>
   <button id="tglLabels" class="on">Ids</button>
   <button id="tglEnemy">Enemy fit r9</button>
+  <button id="tglBoss">Boss fit r13</button>
   <button id="tglRoutes">All routes</button>
   <div class="sep"></div>
   <button id="btnUndo">Undo</button>
-  <button id="btnSelftest" title="Round-trips all five presets through import+export">Self-test</button>
+  <button id="btnSelftest" title="Round-trips every preset through import+export">Self-test</button>
 </header>
 
 <main>
@@ -147,6 +148,7 @@
     <div class="row tight" style="margin-top:6px">
       <button id="radR7" class="on">Robot r=7</button>
       <button id="radR9">Enemy r=9</button>
+      <button id="radR13">Boss r=13</button>
       <button id="btnClearRoute">Clear</button>
     </div>
     <p class="note" id="routeInfo">No route set.</p>
@@ -172,20 +174,25 @@
         <tr><td>Arrows</td><td>nudge selected entity 1 tile (<kbd>Alt</kbd> = half tile)</td></tr>
         <tr><td>Ctrl/Cmd Z</td><td>undo</td></tr>
       </table>
-      <p class="note">Walkability law from floors.ts: robot r=7, enemy r=9 &mdash; every passage
-        the enemy must use is &ge;2 tiles wide. Robot r=7 &lt; TILE/2, so any non-wall tile fits the robot.</p>
+      <p class="note">Walkability law from floors.ts: robot r=7, enemy r=9, <b>boss r=13</b> &mdash;
+        every passage a machine must use is &ge;2 tiles wide, and &ge;3 for the shredder.
+        Robot r=7 &lt; TILE/2, so any non-wall tile fits the robot; nothing else gets that for free.
+        A body wider than a tile stands <em>between</em> tile centres more often than on one,
+        so use the fit washes rather than counting squares.</p>
     </details>
 
     <details>
       <summary>PINNED IDS THE DIRECTOR EXPECTS</summary>
       <table class="k">
         <tr><td>floor 1</td><td>elevA, elevB, pile1, pile2, scrap1</td></tr>
-        <tr><td>floor 2</td><td>elevA, elevB, chip_memory, cable1, scrap1</td></tr>
-        <tr><td>floor 3</td><td>elevA, elevB, crate_EARS, printer1, printer_nice, cable1, chip_magnet, scrap1, scrap2</td></tr>
-        <tr><td>floor 4</td><td>elevA, elevB, crate_BRAIN, printer1, cable1, fuse1, socket1, chip_zap, mop1, scrap1</td></tr>
-        <tr><td>floor 5</td><td>elevA, elevB, crate_triad, scrap1, scrap2</td></tr>
+        <tr><td>floor 2</td><td>elevA, elevB, chip_memory, scrap1, scrap2</td></tr>
+        <tr><td>floor 3</td><td>elevA, elevB, cable1, cable2, scrap1, scrap2</td></tr>
+        <tr><td>floor 4</td><td>elevA, elevB, crate_BRAIN, printer1, cable1, mop1</td></tr>
+        <tr><td>floor 5</td><td>elevA, elevB, fuse1, socket1, printer1, printer2, printer3, printer_nice, cable1</td></tr>
+        <tr><td>floor 6</td><td>elevA, elevB, boss1, crate_ROCKET, printer1, printer2, printer3, printer4, chair1</td></tr>
       </table>
-      <p class="note">Rename at your peril: client/src/sim/selftest.ts fails the build if one goes missing.</p>
+      <p class="note">Rename at your peril: client/src/sim/selftest.ts fails the build if one goes missing.
+        Transcribed from <code>PINNED_IDS</code> there; that array is the authority.</p>
     </details>
   </aside>
 </main>
@@ -202,7 +209,9 @@
 
 /* ------------------------------------------------------ contracts */
 var TILE = 16, TILES_X = 30, TILES_Y = 16;
-var ROBOT_R = 7, ENEMY_R = 9;
+/* Body radii, from client/src/sim/internal.ts. The boss is genuinely wider
+   than a tile is tall, which is why r=13 gets its own fit pass everywhere. */
+var ROBOT_R = 7, ENEMY_R = 9, BOSS_R = 13;
 var CHIP_IDS = ['MAGNET', 'RAGE', 'SCARED', 'MEMORY', 'ZAP', 'TOUGH'];
 
 /* Entity kinds, in palette order. `builder` is the helper in floors.ts. */
@@ -213,14 +222,21 @@ var KINDS = {
   chip:           { glyph:'C',  color:'#5cc8ff', name:'loose chip' },
   scrap:          { glyph:'$',  color:'#d9ae53', name:'scrap' },
   fusedPrinter:   { glyph:'P',  color:'#ff5252', name:'fused printer (enemy)' },
+  fusedShredder:  { glyph:'X',  color:'#ff2e2e', name:'SHREDDER — boss, r=13' },
   printerInnocent:{ glyph:'p',  color:'#b98ae8', name:'nice printer (decoy)' },
   cable:          { glyph:'Z',  color:'#f2e14c', name:'sparking cable' },
   fuse:           { glyph:'F',  color:'#ffd24d', name:'fuse' },
   fuseSocket:     { glyph:'S',  color:'#d977d9', name:'power socket' },
   mop:            { glyph:'M',  color:'#7fd8bf', name:'mop' },
+  chair:          { glyph:'H',  color:'#9aa8bd', name:'office chair' },
   debris:         { glyph:'D',  color:'#8a7659', name:'debris pile' }
 };
 var KIND_ORDER = Object.keys(KINDS);
+/* Kinds that are a THREAT — mirrors HOSTILE_KINDS in sim/internal.ts. These are
+   the ones the body-fit law applies to, each at its own width. */
+var HOSTILE_KINDS = { fusedPrinter:1, fusedShredder:1 };
+/** radiusOf() from sim/internal.ts: the boss is bigger, not a scaled sprite. */
+function radiusOf(e) { return e.kind === 'fusedShredder' ? BOSS_R : ENEMY_R; }
 /* Decor and hazards may sit anywhere; the rest must be reachable (selftest.ts). */
 var UNROUTED_KINDS = { debris:1, cable:1, elevatorA:1 };
 
@@ -529,12 +545,17 @@ function defaultLabel(e) {
     case 'crate':
       if (e.id === 'crate_BRAIN') return 'brain crate';
       if (e.id === 'crate_triad') return 'shiny crate';
+      if (e.id === 'crate_ROCKET') return 'rocket crate';
       return e.option ? e.option.toLowerCase() + ' crate' : 'starter crate';
     case 'debris': return 'pile of broken machines';
     case 'cable': return 'sparking cable';
     case 'fusedPrinter': return 'printer';
+    /* Must stay phonetically clear of 'printer': KIND_SYNONYMS in both parsers
+       maps machine/enemy/monster/thing/baddie to fusedPrinter. */
+    case 'fusedShredder': return 'shredder';
     case 'printerInnocent': return 'nice printer';
     case 'mop': return 'mop';
+    case 'chair': return 'office chair';
     case 'fuse': return 'fuse';
     case 'fuseSocket': return 'power socket';
   }
@@ -543,7 +564,8 @@ function defaultLabel(e) {
 
 var ID_BASE = {
   crate: 'crate', scrap: 'scrap', debris: 'pile', cable: 'cable',
-  fusedPrinter: 'printer', mop: 'mop', fuse: 'fuse', fuseSocket: 'socket'
+  fusedPrinter: 'printer', fusedShredder: 'boss', mop: 'mop', chair: 'chair',
+  fuse: 'fuse', fuseSocket: 'socket'
 };
 function uniqueId(st, base, bareFirst) {
   var taken = {};
@@ -563,6 +585,9 @@ function makeEntity(st, kind, tx, ty) {
   var e = { id: '', kind: kind, tx: tx, ty: ty, label: '' };
   if (kind === 'chip') e.option = 'MEMORY';
   if (kind === 'fusedPrinter') e.hp = 3;
+  // The boss is only ever placed asleep: it is the floor's opening SHOT before
+  // it is the floor's fight, and dormant is what makes it scenery until then.
+  if (kind === 'fusedShredder') { e.hp = 24; e.dormant = true; }
   if (kind === 'elevatorB') e.dark = false;
   e.id = suggestId(st, kind, e.option);
   e.label = defaultLabel(e);
@@ -583,6 +608,7 @@ function builderCall(e) {
     case 'crate':
       if (e.id === 'crate_BRAIN') return 'brainCrate(' + A + ')';
       if (e.id === 'crate_triad') return 'triadCrate(' + A + ')';
+      if (e.id === 'crate_ROCKET') return 'rocketCrate(' + A + ')';
       return e.option
         ? 'crate(' + quote(e.id) + ', ' + A + ', ' + quote(e.option) + ')'
         : 'crate(' + quote(e.id) + ', ' + A + ')';
@@ -590,9 +616,15 @@ function builderCall(e) {
     case 'scrap': return 'scrap(' + quote(e.id) + ', ' + A + ')';
     case 'debris': return 'debris(' + quote(e.id) + ', ' + A + ')';
     case 'cable': return 'cable(' + quote(e.id) + ', ' + A + ')';
-    case 'fusedPrinter': return 'printer(' + quote(e.id) + ', ' + A + ', ' + (e.hp == null ? 3 : e.hp) + ')';
+    // dormantPrinter() is `{ ...printer(id, pos, 3), state: 'dormant' }` — hp is
+    // baked in at 3, so a dormant add cannot carry a custom one.
+    case 'fusedPrinter': return e.dormant
+      ? 'dormantPrinter(' + quote(e.id) + ', ' + A + ')'
+      : 'printer(' + quote(e.id) + ', ' + A + ', ' + (e.hp == null ? 3 : e.hp) + ')';
+    case 'fusedShredder': return 'shredder(' + quote(e.id) + ', ' + A + ')';
     case 'printerInnocent': return 'innocent(' + quote(e.id) + ', ' + A + ')';
     case 'mop': return 'mop(' + quote(e.id) + ', ' + A + ')';
+    case 'chair': return 'chair(' + quote(e.id) + ', ' + A + ')';
     case 'fuse': return 'fuse(' + quote(e.id) + ', ' + A + ')';
     case 'fuseSocket': return 'socket(' + quote(e.id) + ', ' + A + ')';
   }
@@ -708,12 +740,23 @@ function parseFloor(text) {
   collect(rx('\\bchip\\s*\\(\\s*' + RX_STR + '\\s*,\\s*' + RX_AT + '\\s*,\\s*' + RX_STR + '\\s*\\)'), function (g) {
     return { id: unquote(g[1]), kind: 'chip', tx: +g[2], ty: +g[3], option: unquote(g[4]).toUpperCase() };
   });
+  // `\b` before a lowercase 'p' does not match the capital in dormantPrinter,
+  // so these two never steal each other's calls.
   collect(rx('\\bprinter\\s*\\(\\s*' + RX_STR + '\\s*,\\s*' + RX_AT + '\\s*,\\s*(\\d+)\\s*\\)'), function (g) {
     return { id: unquote(g[1]), kind: 'fusedPrinter', tx: +g[2], ty: +g[3], hp: +g[4] };
   });
+  collect(rx('\\bdormantPrinter\\s*\\(\\s*' + RX_STR + '\\s*,\\s*' + RX_AT + '\\s*\\)'), function (g) {
+    return { id: unquote(g[1]), kind: 'fusedPrinter', tx: +g[2], ty: +g[3], hp: 3, dormant: true };
+  });
+  collect(rx('\\bshredder\\s*\\(\\s*' + RX_STR + '\\s*,\\s*' + RX_AT + '\\s*\\)'), function (g) {
+    return { id: unquote(g[1]), kind: 'fusedShredder', tx: +g[2], ty: +g[3], hp: 24, dormant: true };
+  });
+  collect(rx('\\brocketCrate\\s*\\(\\s*' + RX_AT + '\\s*\\)'), function (g) {
+    return { id: 'crate_ROCKET', kind: 'crate', tx: +g[1], ty: +g[2] };
+  });
   var SIMPLE = {
     scrap: 'scrap', debris: 'debris', cable: 'cable', innocent: 'printerInnocent',
-    mop: 'mop', fuse: 'fuse', socket: 'fuseSocket'
+    mop: 'mop', chair: 'chair', fuse: 'fuse', socket: 'fuseSocket'
   };
   Object.keys(SIMPLE).forEach(function (fn) {
     collect(rx('\\b' + fn + '\\s*\\(\\s*' + RX_STR + '\\s*,\\s*' + RX_AT + '\\s*\\)'), function (g) {
@@ -840,24 +883,31 @@ function validateState(st) {
     });
   }
 
-  /* enemy width law — every printer must physically be able to come at you */
-  var printers = st.entities.filter(function (e) { return e.kind === 'fusedPrinter'; });
-  if (printers.length > 0 && spawn) {
-    var fit = buildFitField(solid, ENEMY_R);
-    printers.forEach(function (e) {
+  /* body-width law — every hostile must physically be able to come at you, at
+     ITS OWN width. The robot is r=7 < TILE/2 and fits in any non-wall tile, so
+     a passage that looks fine on the map can still be one no machine can use.
+     Mirrors bossArenaFitsEnemies() in client/src/sim/selftest.ts. */
+  var hostiles = st.entities.filter(function (e) { return HOSTILE_KINDS[e.kind]; });
+  if (hostiles.length > 0 && spawn) {
+    var fitByR = {};
+    hostiles.forEach(function (e) {
       var p = entityPos(e);
-      if (!bodyFits(solid, p.x, p.y, ENEMY_R)) {
-        err("Enemy '" + e.id + "' is wedged: an r=9 body does not fit where it spawns. Needs 2 clear tiles around it.");
+      var r = radiusOf(e);
+      if (!fitByR[r]) fitByR[r] = buildFitField(solid, r);
+      var fit = fitByR[r];
+      var need = r === BOSS_R ? '3 clear tiles' : '2 clear tiles';
+      if (!bodyFits(solid, p.x, p.y, r)) {
+        err("'" + e.id + "' is wedged: an r=" + r + " body does not fit where it spawns. Needs " + need + " around it.");
         return;
       }
       var reach = fitReach(fit, p);
-      if (!reach) { err("Enemy '" + e.id + "' has nowhere to stand."); return; }
+      if (!reach) { err("'" + e.id + "' has nowhere to stand."); return; }
       if (!fitReaches(fit, reach, spawn)) {
-        err("Enemy '" + e.id + "' cannot reach the robot spawn at r=9 — a passage on the way is under 2 tiles wide.");
+        err("'" + e.id + "' cannot reach the robot spawn at r=" + r + " — a passage on the way is too narrow for its body.");
       }
       elevBs.forEach(function (b) {
         if (!fitReaches(fit, reach, entityPos(b))) {
-          warn("Enemy '" + e.id + "' cannot reach the exit elevator at r=9 — it can never contest the way out.");
+          warn("'" + e.id + "' cannot reach the exit elevator at r=" + r + " — it can never contest the way out.");
         }
       });
     });
@@ -883,11 +933,16 @@ var PRESETS = [
   },
   { name: 'FLOOR 5 — victory lap, triad island', src:
 "  {\n    map: [\n      '##############################',\n      '#............................#',\n      '#............................#',\n      '#............................#',\n      '#............................#',\n      '#............................#',\n      '#...........######...........#',\n      '#................#...........#',\n      '#................#...........#',\n      '#...........######...........#',\n      '#............................#',\n      '#............................#',\n      '#............................#',\n      '#............................#',\n      '#............................#',\n      '##############################',\n    ],\n    entities: () => [\n      elevA(at(2, 8)),\n      elevB(at(27, 8), true),\n      triadCrate(at(14.5, 7.5)),\n      scrap('scrap1', at(7, 3)),\n      scrap('scrap2', at(22, 12)),\n    ],\n  },"
+  },
+  { name: 'FLOOR 6 — the shredder, boss arena (trailer-only)', src:
+"  {\n    map: [\n      '##############################',\n      '#............................#',\n      '#............................#',\n      '#............................#',\n      '#....##.....##........##.....#',\n      '#....##.....##........##.....#',\n      '#............................#',\n      '#............................#',\n      '#............................#',\n      '#............................#',\n      '#.......##......##......##...#',\n      '#.......##......##......##...#',\n      '#............................#',\n      '#............................#',\n      '#............................#',\n      '##############################',\n    ],\n    entities: () => [\n      elevA(at(27, 7.5)),\n      elevB(at(2, 7.5), true),\n      shredder('boss1', at(15, 7.5)),\n      rocketCrate(at(20, 13)),\n      dormantPrinter('printer1', at(3, 2)),\n      dormantPrinter('printer2', at(26, 2)),\n      dormantPrinter('printer3', at(3, 13)),\n      dormantPrinter('printer4', at(26, 13)),\n      chair('chair1', at(10, 9)),\n      debris('pile1', at(12, 9)),\n      debris('pile2', at(19, 6)),\n    ],\n  },"
   }
 ];
 
 /** Import -> export -> import -> export must be stable, and must not lose
- *  entities or map rows. Wired to the SELF-TEST button. */
+ *  entities or map rows. Wired to the SELF-TEST button. Covers every preset,
+ *  which is what makes a new builder (shredder, dormantPrinter, rocketCrate,
+ *  chair) a thing the tool proves it can read back rather than merely write. */
 function selfTest() {
   var lines = [];
   var bad = 0;
@@ -923,6 +978,7 @@ var UI = {
   zoom: 3,
   showIds: true,
   showEnemy: false,
+  showBoss: false,
   showRoutes: false,
   routeA: null,
   routeB: null,
@@ -931,7 +987,7 @@ var UI = {
   drag: null,
   rect: null,
   undo: [],
-  fitCache: null,
+  fitCache: {},
   fitDirty: true
 };
 var TOOLS = [
@@ -983,12 +1039,12 @@ function resizeCanvas() {
 }
 function mono(px, bold) { return (bold ? 'bold ' : '') + px + 'px ui-monospace,Menlo,Consolas,monospace'; }
 
-function fitField() {
-  if (UI.fitDirty || !UI.fitCache) {
-    UI.fitCache = buildFitField(buildSolid(S), ENEMY_R);
-    UI.fitDirty = false;
-  }
-  return UI.fitCache;
+/** Cached fit field per radius — r=9 and r=13 are both on-screen toggles now,
+ *  and rebuilding either on every frame is the one thing here that is not free. */
+function fitField(r) {
+  if (UI.fitDirty) { UI.fitCache = {}; UI.fitDirty = false; }
+  if (!UI.fitCache[r]) UI.fitCache[r] = buildFitField(buildSolid(S), r);
+  return UI.fitCache[r];
 }
 
 function draw() {
@@ -1023,18 +1079,21 @@ function draw() {
     }
   }
 
-  /* enemy fit wash */
-  if (UI.showEnemy) {
-    var fit = fitField();
+  /* body fit washes. Both can be on at once: the interesting ground on a boss
+     floor is the gap between them — where an add can go and the boss cannot. */
+  [[UI.showEnemy, ENEMY_R, 'rgba(90,220,255,0.20)'],
+   [UI.showBoss, BOSS_R, 'rgba(255,90,90,0.20)']].forEach(function (w) {
+    if (!w[0]) return;
+    var fit = fitField(w[1]);
     offCtx.clearRect(0, 0, W, H);
-    offCtx.fillStyle = 'rgba(90,220,255,0.20)';
+    offCtx.fillStyle = w[2];
     for (var j = 0; j < SH; j++) {
       for (var i = 0; i < SW; i++) {
         if (fit[j * SW + i]) offCtx.fillRect(i * SAMP, j * SAMP, SAMP, SAMP);
       }
     }
     ctx.drawImage(off, 0, 0, W, H);
-  }
+  });
 
   /* grid */
   ctx.lineWidth = 0.4;
@@ -1483,7 +1542,7 @@ function buildInspector() {
   if (e.kind === 'crate') {
     var quick = document.createElement('div');
     quick.className = 'row tight';
-    [['crate_EARS', 'EARS'], ['crate_BRAIN', 'BRAIN'], ['crate_triad', 'triad']].forEach(function (q) {
+    [['crate_EARS', 'EARS'], ['crate_BRAIN', 'BRAIN'], ['crate_triad', 'triad'], ['crate_ROCKET', 'ROCKET']].forEach(function (q) {
       var b = document.createElement('button');
       b.textContent = q[1];
       b.onclick = function () {
@@ -1498,13 +1557,29 @@ function buildInspector() {
     });
     host.appendChild(field('pinned crate ids', quick));
   }
-  if (e.kind === 'fusedPrinter') {
+  // dormantPrinter() bakes hp at 3, so the box is only useful on an awake one.
+  if (e.kind === 'fusedPrinter' && !e.dormant) {
     var hp = document.createElement('input');
     hp.type = 'number';
     hp.min = '1';
     hp.value = e.hp == null ? 3 : e.hp;
     hp.onchange = function () { pushUndo(); e.hp = Math.max(1, parseInt(hp.value, 10) || 1); refresh(); };
     host.appendChild(field('hp', hp));
+  }
+  if (HOSTILE_KINDS[e.kind]) {
+    var dm = document.createElement('button');
+    dm.className = 'wide';
+    dm.textContent = e.dormant ? 'DORMANT — scenery until woken' : 'AWAKE — live from the first tick';
+    dm.classList.toggle('on', !!e.dormant);
+    dm.title = 'isLiveHostile() excludes dormant machines: not a threat, not a target, ' +
+      'not something to route around, until wakeMachine() stands it up.';
+    dm.onclick = function () {
+      pushUndo();
+      e.dormant = !e.dormant;
+      if (e.dormant && e.kind === 'fusedPrinter') e.hp = 3; // the builder's fixed hp
+      refresh();
+    };
+    host.appendChild(dm);
   }
   if (e.kind === 'elevatorB') {
     var dk = document.createElement('button');
@@ -1698,6 +1773,7 @@ function boot() {
   $('btnZoomOut').onclick = function () { UI.zoom = Math.max(1.5, UI.zoom - 0.5); applyZoom(); };
   $('tglLabels').onclick = function () { UI.showIds = !UI.showIds; this.classList.toggle('on', UI.showIds); draw(); };
   $('tglEnemy').onclick = function () { UI.showEnemy = !UI.showEnemy; this.classList.toggle('on', UI.showEnemy); draw(); };
+  $('tglBoss').onclick = function () { UI.showBoss = !UI.showBoss; this.classList.toggle('on', UI.showBoss); draw(); };
   $('tglRoutes').onclick = function () { UI.showRoutes = !UI.showRoutes; this.classList.toggle('on', UI.showRoutes); draw(); };
   $('btnUndo').onclick = undo;
   $('btnSelftest').onclick = function () {
@@ -1709,12 +1785,16 @@ function boot() {
   $('btnPickA').onclick = function () { setTool('routeA'); };
   $('btnPickB').onclick = function () { setTool('routeB'); };
   $('btnClearRoute').onclick = function () { UI.routeA = null; UI.routeB = null; refresh(); };
-  $('radR7').onclick = function () {
-    UI.routeR = ROBOT_R; this.classList.add('on'); $('radR9').classList.remove('on'); refresh();
-  };
-  $('radR9').onclick = function () {
-    UI.routeR = ENEMY_R; this.classList.add('on'); $('radR7').classList.remove('on'); refresh();
-  };
+  // Three radii, one lit at a time. r=13 is a route the PLANNER would return;
+  // the boss actually seeks in a straight line and slides, so read it as "could
+  // a body this wide get through here", not as its literal path.
+  [['radR7', ROBOT_R], ['radR9', ENEMY_R], ['radR13', BOSS_R]].forEach(function (b) {
+    $(b[0]).onclick = function () {
+      UI.routeR = b[1];
+      ['radR7', 'radR9', 'radR13'].forEach(function (id) { $(id).classList.toggle('on', id === b[0]); });
+      refresh();
+    };
+  });
   $('btnCopy').onclick = copyOut;
   $('btnImport').onclick = doImport;
 

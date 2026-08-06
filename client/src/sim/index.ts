@@ -25,16 +25,24 @@ import {
   applyOrder,
   entityById,
   hostileInSight,
+  isLiveHostile,
+  kindWeight,
   nearestHostile as nearestHostileEntity,
   newScratch,
 } from './internal';
 import type { RobotScratch } from './internal';
 import { stepEnemies, stepHazards } from './enemies';
 import { stepProjectiles } from './projectiles';
+import { stepMortars } from './mortar';
+import { stepBoss } from './boss';
 import { dist } from './physics';
 import { proximityTriggers, stepRobot } from './robot';
 
 export { entityById } from './internal';
+
+/** How many floors exist. The dev `?floor=N` shortcut bounds itself on this, so
+ *  adding a floor never needs a second edit in the director to be reachable. */
+export const FLOOR_COUNT = FLOORS.length;
 
 /**
  * Nearest live hostile with its distance to the robot, for the director.
@@ -91,10 +99,14 @@ export function initialState(seed: number): SimState {
       speed: BASE.speedPxS,
       damage: BASE.damage,
       shootCd: 0,
+      rocketCd: 0,
+      rockets: false,
       wallBumpTicks: 0,
     },
     entities: [],
     projectiles: [],
+    mortars: [],
+    nextId: 0,
     solid: [],
     events: [],
     frozen: false,
@@ -118,6 +130,11 @@ export function loadFloor(state: SimState, floorIndex: number): void {
   state.solid = buildSolid(def.map);
   state.entities = def.entities();
   state.projectiles = [];
+  state.mortars = [];
+  // Ids are only ever compared within a floor, so the counter restarts with it
+  // — and a restart from tick 0 then produces byte-identical ids, which is what
+  // keeps the determinism snapshot meaningful across a floor change.
+  state.nextId = 0;
   state.events = [];
 
   const r = state.robot;
@@ -138,6 +155,7 @@ export function loadFloor(state: SimState, floorIndex: number): void {
   r.sulkTicks = 0;
   r.wallBumpTicks = 0;
   r.shootCd = 0;
+  r.rocketCd = 0;
   r.standing.avoidIds = []; // ids died with the old floor; the policy survives
   if (!r.hasMemory) r.name = null; // the forgetting gag
   if (b) {
@@ -162,6 +180,12 @@ export function step(state: SimState): void {
     stepEnemies(state, scratch);
     stepHazards(state, scratch);
     stepProjectiles(state, scratch);
+    // After projectiles: a mortar's shell is decoration flying alongside it, so
+    // the two must not resolve out of order or the boom precedes the arrival.
+    // Before proximityTriggers: a robot killed by a blast this tick must not
+    // also be allowed to step into the lift and end the floor from the grave.
+    stepMortars(state, scratch);
+    stepBoss(state, scratch);
   }
   proximityTriggers(state);
 }
@@ -176,7 +200,69 @@ export function step(state: SimState): void {
  */
 export function setOrder(state: SimState, order: Order | null): void {
   if (order !== null) state.robot.awaitingBriefing = false;
+  // Re-applying the order that is ALREADY running is not a no-op: applyOrder
+  // wipes the nav path and resets the settle clock, so the robot stops for a
+  // beat and re-plans a route it was happily following. That used to be a freak
+  // event; with the parse fast-path the model's confirmation arrives a second
+  // behind the local reading and says the same thing, so it would be routine —
+  // and the player would see the robot hitch every single time it was right.
+  if (order !== null && sameOrder(state.robot.order, order)) {
+    // Ownership still transfers: an order the robot chose for itself becomes
+    // the player's the moment they ask for it, which is what the OSD arrow and
+    // the "finished the job" report both read off.
+    state.robot.selfDriven = false;
+    return;
+  }
   applyOrder(state, scratchOf(state), order, false);
+}
+
+/** Same task, same parameters — the test behind the re-apply guard above.
+ *  A nudge (`move` with distancePx) is deliberately never "the same": it is a
+ *  RELATIVE order, and "left a bit… left a bit" is two nudges, not one. */
+function sameOrder(a: Order | null, b: Order): boolean {
+  if (a === null || a.kind !== b.kind) return false;
+  switch (b.kind) {
+    case 'move':
+      if (b.distancePx !== undefined || (a as { distancePx?: number }).distancePx !== undefined) return false;
+      return (a as { dir: string }).dir === b.dir;
+    case 'goto':
+    case 'pickup':
+      return (
+        (a as { targetId: string }).targetId === b.targetId &&
+        ((a as { careful?: boolean }).careful ?? false) === (b.careful ?? false)
+      );
+    case 'attack':
+    case 'enter':
+      return (a as { targetId: string }).targetId === b.targetId;
+    default:
+      // stop / shoot / explore / hide / retreat / evade are deliberately NOT
+      // guarded. They carry no fields, so a repeat is never an accident — it is
+      // the player asking for a fresh answer ("hide" again because the first
+      // piece of cover was rubbish), and applyOrder's scratch reset is exactly
+      // what re-picks it.
+      return false;
+  }
+}
+
+/**
+ * The order behind "RUN!". Which one depends on whether anything is chasing.
+ *
+ * The sim has two flight orders and the difference matters at exactly the
+ * moment the operator panics:
+ * - `retreat` backs away and KEEPS backing away until nothing can see the robot
+ *   any more. It is the right answer while something is hunting it, and it ends
+ *   on its own so a panicked shout does not cost the rest of the floor.
+ * - `evade` never plants and never finishes. It is the right answer when
+ *   nothing is chasing, because `retreat` with an empty threat list halts and
+ *   reports "done" on its FIRST tick — the operator shouts "run!", the robot
+ *   says it ran, and nothing moves. That fizzle is indistinguishable from the
+ *   bug this whole thing exists to fix.
+ *
+ * Lives here rather than in the director so the choice is made where the threat
+ * list is, and so the director's flee case stays one line it cannot get wrong.
+ */
+export function fleeOrder(state: SimState): Order {
+  return hostileInSight(state) !== null ? { kind: 'retreat' } : { kind: 'evade' };
 }
 
 /** The player said something directive but gave no order (a standing rule, a
@@ -232,6 +318,44 @@ export function applyDirectives(state: SimState, kinds: readonly DirectiveKind[]
       case 'wait_for_orders':
         st.autonomy = false;
         st.roam = false;
+        break;
+      case 'keep_distance':
+        // Deliberately does NOT touch `fight`. That is the whole difference
+        // between "keep back" and "avoid enemies": one is how to fight, the
+        // other is a refusal to. Collapsing them loses the mid-fight
+        // readjustment the doctrine directives exist for.
+        st.spacing = 'far';
+        break;
+      case 'close_in':
+        // You cannot close on something you are routing around, so this
+        // overrides the avoid rule outright rather than fighting it every tick.
+        st.spacing = 'close';
+        st.avoidEnemies = false;
+        st.fight = true;
+        break;
+      case 'dodge_projectiles':
+        st.dodgeZones = true;
+        break;
+      case 'ignore_projectiles':
+        st.dodgeZones = false;
+        break;
+      case 'keep_moving':
+        st.keepMoving = true;
+        break;
+      case 'hold_ground':
+        st.keepMoving = false;
+        break;
+      case 'focus_dangerous':
+        st.focus = 'dangerous';
+        break;
+      case 'focus_nearest':
+        st.focus = 'nearest';
+        break;
+      case 'use_rockets':
+        st.weapon = 'rocket';
+        break;
+      case 'use_bolts':
+        st.weapon = 'bolt';
         break;
     }
   }
@@ -333,13 +457,45 @@ export function describeOrder(state: SimState): string | null {
       return 'hiding';
     case 'retreat':
       return 'backing away';
+    case 'evade':
+      return 'dodging';
   }
 }
 
-/** Live entities with rough bearing + distance, for the LLM parse request. */
+/** Body class as a WORD. "the big one" has to bind to something the model can
+ *  read off one entity, rather than a number it has to compare across the list. */
+function sizeOf(e: Entity): 'small' | 'big' | 'boss' {
+  return e.kind === 'fusedShredder' ? 'boss' : 'small';
+}
+
+/**
+ * Live entities with rough bearing + distance, for the LLM parse request.
+ *
+ * Live hostiles additionally carry `rank` (1 = the thing most likely to kill
+ * the robot next) and `size`. Two fields rather than one float on purpose: the
+ * model needs a WORD to bind "the big one" to, and the local matcher needs a
+ * discrete selector it can sort on.
+ *
+ * The returned array is NOT reordered. `matchEntity` takes the first entity on
+ * a score tie, and several behaviours — the dead-elevator tie-break above all —
+ * depend on floor spawn order.
+ */
 export function visibleEntities(state: SimState): ParseEntity[] {
   const r = state.robot;
   const out: ParseEntity[] = [];
+  // Threat score, worst first. kindWeight × proximity is the same shape the
+  // robot's own targeting uses; it does not have to agree to the last decimal,
+  // it has to agree about WHICH ONE, and the boss outweighs a printer 3:1 at
+  // any distance either of them can shoot from.
+  const scored: Array<{ id: string; score: number }> = [];
+  for (const e of state.entities) {
+    if (!isLiveHostile(e)) continue;
+    const d = Math.hypot(e.pos.x - r.pos.x, e.pos.y - r.pos.y);
+    scored.push({ id: e.id, score: (kindWeight(e) * 1000) / (d + 40) });
+  }
+  scored.sort((a, b) => b.score - a.score || (a.id < b.id ? -1 : 1));
+  const rankById = new Map(scored.map((s, i) => [s.id, i + 1]));
+
   for (const e of state.entities) {
     if (e.dead) continue;
     const dx = e.pos.x - r.pos.x;
@@ -352,7 +508,19 @@ export function visibleEntities(state: SimState): ParseEntity[] {
         : dy < 0
           ? 'above robot'
           : 'below robot';
-    out.push({ id: e.id, kind: e.kind, label: e.label, dir, dist: Math.round(Math.hypot(dx, dy)) });
+    const ent: ParseEntity = {
+      id: e.id,
+      kind: e.kind,
+      label: e.label,
+      dir,
+      dist: Math.round(Math.hypot(dx, dy)),
+    };
+    const rank = rankById.get(e.id);
+    if (rank !== undefined) {
+      ent.rank = rank;
+      ent.size = sizeOf(e);
+    }
+    out.push(ent);
   }
   return out;
 }

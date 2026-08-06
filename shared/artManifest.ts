@@ -16,6 +16,18 @@ export interface ArtEntry {
   h: number;
   /** Anchor 0..1; default [0.5, 0.5]. */
   anchor?: [number, number];
+  /**
+   * Where the pixels come from. Default 'code' — a drawer in `client/src/art`.
+   *
+   * 'png' entries are pre-rendered at BUILD time from a 3D model by
+   * `tools/render-sprite.py` (Blender, headless) and live in
+   * `client/src/art/sprites/`. The bundle law is untouched: the model stays in
+   * gitignored `art-src/`, only the finished pixels ship, and at these sizes
+   * Vite inlines the PNG as a data URI. Single-frame only for now — a frame
+   * count means an animation, which means a strip, which the pipeline doesn't
+   * cut yet.
+   */
+  src?: 'code' | 'png';
 }
 
 export const ART = {
@@ -32,8 +44,20 @@ export const ART = {
   /** Printer melted onto a vacuum. 4-frame lurch-roll, papers jammed in teeth. */
   fused_printer: { frames: 4, w: 22, h: 18 },
   fused_printer_spit: { frames: 2, w: 22, h: 18 }, // attack telegraph + spit
+  /** The floor-6 boss. PLACEHOLDER: a single blocky silhouette that reads as
+   *  "much bigger machine" at the right size and palette, so layout, shadow and
+   *  collision can be tuned against real pixels. The real thing is a character
+   *  — its maw has to read as a face at 34px — and is hand-drawn over ~9 frames. */
+  fused_shredder: { frames: 1, w: 34, h: 26 },
   printer_innocent: { frames: 2, w: 16, h: 12 }, // peaceful blinking LED
   mop: { frames: 1, w: 8, h: 18 },
+  /**
+   * Office chair — the first prop rendered from a 3D model instead of drawn.
+   * Same job as the mop: furniture the robot can misidentify, and proof the
+   * asset-store pipeline lands in the room's projection and palette. Anchor is
+   * the measured ground contact (its castors), not the sprite's middle.
+   */
+  office_chair: { frames: 1, w: 16, h: 20, anchor: [0.5, 0.8], src: 'png' },
 
   // --- props / pickups ---
   scrap: { frames: 2, w: 8, h: 6 }, // glint frame
@@ -68,6 +92,19 @@ export const ART = {
   fx_smoke: { frames: 4, w: 10, h: 10 },
   fx_muzzle: { frames: 2, w: 8, h: 8 },
   fx_boom: { frames: 5, w: 20, h: 20 }, // enemy death pop (smoke+parts, not fire)
+  /**
+   * The explosion ladder. One 20px pop cannot carry a boss fight, and three
+   * tiers only work if they are unmistakably different SIZES — so `fx_boom`
+   * stays exactly as it is for add deaths and these sit above it.
+   *
+   * Still no fire, and now for a reason rather than a rule: the boss is a paper
+   * shredder, so its detonations are shredded document and toner — grey-white
+   * and black. Orange would also put a second saturated thing on screen in
+   * precisely the frames where the robot has to stay the eye's anchor.
+   */
+  fx_burst: { frames: 6, w: 36, h: 36 }, // rocket impact / mortar detonation
+  fx_blast: { frames: 8, w: 72, h: 72 }, // boss death only
+  fx_shock: { frames: 4, w: 64, h: 16 }, // ground shockwave ring, flattened to the projection
 
   // --- glyphs (OSD module strip; amber allowed here as they're UI-adjacent) ---
   glyph_MAGNET: { frames: 1, w: 8, h: 8 },
@@ -79,6 +116,7 @@ export const ART = {
   /** Crate upgrades — same strip, same 8×8 grid as the chips. */
   glyph_EARS: { frames: 1, w: 8, h: 8 },
   glyph_BRAIN: { frames: 1, w: 8, h: 8 },
+  glyph_ROCKET: { frames: 1, w: 8, h: 8 },
 } as const satisfies Record<string, ArtEntry>;
 
 export type ArtName = keyof typeof ART;

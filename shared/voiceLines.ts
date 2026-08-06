@@ -118,6 +118,20 @@ export const VOICE_BANK: BankLine[] = [
   { id: 'cliff_voice1', text: '…Voice? … It is dark here.' },
   { id: 'cliff_voice2', text: 'Robot is not scared.' },
   { id: 'cliff_voice3', text: '…Voice?' },
+  /**
+   * THE LAST LINE, after the shredder.
+   *
+   * The PAUSE is the line. Third person holds — the robot never stops being
+   * "ROBOT" — so the vulnerability cannot come from the words, which are the
+   * same overconfident register as everything before them. It comes from the
+   * gap: it asks, then hesitates, then has to check the operator is still
+   * there. A machine that has just won the hardest fight in the building and is
+   * not sure whether that counted.
+   *
+   * The ellipsis is deliberate and load-bearing — the TTS reads it as a beat
+   * and the caption holds on it. Do not tidy it into one clause.
+   */
+  { id: 'cliff_win', text: 'Did robot win… Voice?' },
 ];
 
 export const BANK_BY_ID: Record<string, BankLine> = Object.fromEntries(

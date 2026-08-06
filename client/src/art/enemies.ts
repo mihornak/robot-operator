@@ -152,6 +152,57 @@ export function drawFusedPrinterSpit(p: Px, frame: number): void {
   drawFused(p, SPIT[frame]);
 }
 
+/**
+ * fused_shredder 34×26 — PLACEHOLDER for the floor-6 boss.
+ *
+ * One static frame, no character in it yet: a slab of a machine at the right
+ * mass and in the right palette, so the arena, the shadow and the r=13 body can
+ * be built against real pixels instead of a guess. Same rust/olive as its small
+ * cousin (the palette law is not relaxed for the boss — nothing out-saturates
+ * the robot), just far more of it. The maw is the one thing sketched in, since
+ * it is what the finished sprite has to sell.
+ */
+export function drawFusedShredder(p: Px, _frame: number): void {
+  // treads — a shredder this size does not roll on casters
+  p.r(3, 23, 28, 3, G.g2);
+  p.hl(3, 25, 28, G.g1);
+  for (let x = 5; x < 30; x += 4) p.vl(x, 23, 3, G.g1);
+
+  // lower housing: the wide olive chassis it was fused onto
+  p.hl(2, 15, 30, FOE.oliveHi);
+  p.r(1, 16, 32, 7, FOE.olive);
+  p.hl(1, 18, 32, FOE.oliveSh);
+  p.hl(2, 22, 30, FOE.oliveSh);
+  p.vl(0, 17, 5, FOE.oliveSh);
+  p.vl(33, 17, 5, FOE.oliveSh);
+
+  // upper hopper, rust — narrower, so the silhouette steps rather than boxes
+  p.r(4, 3, 26, 12, FOE.rust);
+  p.hl(4, 3, 26, FOE.rustHi);
+  p.hl(4, 14, 26, FOE.rustSh);
+  p.vl(4, 4, 10, FOE.rustHi);
+  p.vl(29, 4, 10, FOE.rustSh);
+  // intake lip along the top — where the paper goes in
+  p.r(8, 1, 18, 2, G.g3);
+  p.hl(8, 1, 18, G.g4);
+
+  // the maw: a wide dark slit with ragged paper caught in it
+  p.r(8, 9, 18, 4, FOE.maw);
+  p.hl(8, 8, 18, G.g1);
+  for (const [x, c] of [
+    [9, MAT.paper], [12, MAT.paperSh], [15, MAT.paper], [18, MAT.paperSh], [21, MAT.paper], [24, MAT.paperSh],
+  ] as ReadonlyArray<readonly [number, string]>) {
+    p.p(x, 9, c);
+    p.p(x + 1, 10, c);
+  }
+
+  // two red eyes above the maw — the only warm ink on it
+  p.p(10, 6, FOE.ledRed);
+  p.p(23, 6, FOE.ledRed);
+  p.p(11, 6, FOE.ledRedDim);
+  p.p(24, 6, FOE.ledRedDim);
+}
+
 /** printer_innocent 16×12 — clean, tidy, gently blinking. Harmless. Honest. */
 export function drawPrinterInnocent(p: Px, frame: number): void {
   // feet

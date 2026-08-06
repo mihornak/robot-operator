@@ -59,9 +59,9 @@ function walkableCells(state: SimState): Array<{ x: number; y: number }> {
 /**
  * Things an order can meaningfully target. Excluded, and why:
  * - cable/debris/elevatorA — "go and stand on the live wire" failing is correct
- * - fusedPrinter — it chases and knocks the robot back, so closing to a 12px
- *   arrival radius is not something navigation can guarantee. Fighting is
- *   covered by the combat tests in selftest.ts.
+ * - fusedPrinter / fusedShredder — they chase and knock the robot back, so
+ *   closing to a 12px arrival radius is not something navigation can
+ *   guarantee. Fighting is covered by the combat tests in selftest.ts.
  */
 function targetable(state: SimState): Entity[] {
   return state.entities.filter(
@@ -70,7 +70,8 @@ function targetable(state: SimState): Entity[] {
       e.kind !== 'cable' &&
       e.kind !== 'debris' &&
       e.kind !== 'elevatorA' &&
-      e.kind !== 'fusedPrinter',
+      e.kind !== 'fusedPrinter' &&
+      e.kind !== 'fusedShredder',
   );
 }
 

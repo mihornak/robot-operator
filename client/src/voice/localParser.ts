@@ -17,6 +17,7 @@ import type {
   Utterance,
 } from '@shared/types';
 import { CHIPS } from '@shared/content';
+import { smallTalk } from '@shared/smallTalk';
 
 export interface LocalParseCtx {
   tier: EarsTier;
@@ -27,6 +28,25 @@ export interface LocalParseCtx {
   brain?: boolean;
   /** The question ROBOT is waiting on, if any — makes a bare "yes" meaningful. */
   pendingQuestion?: string | null;
+  /** Name for the conversation bank ("BEEP IS EXCELLENT."). */
+  robotName?: string | null;
+  /** Dialogue log, so the keyless robot does not answer the same way twice. */
+  recent?: string[];
+  /** Nothing hostile awake — false makes conversation a deflection. */
+  calm?: boolean;
+}
+
+/**
+ * A conversational answer, keyless. `ack_line` stays the one-line version for
+ * the log and the OSD; `talk` is the run the robot actually speaks.
+ */
+function chat(raw: string, ctx: LocalParseCtx): ParsedCommand {
+  const { lines } = smallTalk(raw, {
+    name: (ctx.robotName ?? 'ROBOT').toUpperCase(),
+    recent: ctx.recent ?? [],
+    calm: ctx.calm ?? true,
+  });
+  return { intent: 'chatter', ack_line: lines[0]!, talk: lines };
 }
 
 // ---------------------------------------------------------------- wordlists
@@ -196,11 +216,40 @@ const NO_WORDS = new Set(['no', 'nope', 'nah', 'dont', 'negative']);
 const NO_PHRASES = ['not that', 'no thanks', 'bad idea', 'hold on'];
 
 /** Standing rules of engagement, keyed by the phrase that sets them. The more
- *  specific phrasing must come first within an opposed pair. */
-const DIRECTIVE_PHRASES: Array<{ kind: DirectiveKind; any: string[] }> = [
+ *  specific phrasing must come first within an opposed pair. `not` is an escape
+ *  hatch for entries whose phrasing is a genuine substring of a MORE specific
+ *  rule's phrasing — see avoid_enemies below. */
+const DIRECTIVE_PHRASES: Array<{ kind: DirectiveKind; any: string[]; not?: string[] }> = [
   { kind: 'no_gather', any: ['stop picking', 'no picking', 'dont pick', 'ignore the scrap', 'ignore scrap', 'leave the scrap', 'no looting', 'dont grab'] },
   { kind: 'gather', any: ['pick everything', 'grab everything', 'pick up everything', 'take the scrap', 'grab shiny', 'loot everything', 'collect everything'] },
-  { kind: 'avoid_enemies', any: ['avoid the enemies', 'avoid enemies', 'avoid the machines', 'avoid machines', 'avoid the printers', 'avoid printers', 'dont fight', 'no fighting', 'stop fighting', 'stay away from them', 'run away from', 'avoid them', 'dodge them'] },
+  // ---- combat doctrine ----------------------------------------------------
+  // These sit ABOVE avoid_enemies deliberately. "run away from the red circles"
+  // and "keep your distance" are readings the generic avoid rule would swallow
+  // whole, and losing the specific one costs the player the exact mid-fight
+  // readjustment they just made — which is the whole reason these exist.
+  // 'further back' is listed SEPARATELY from bare 'further' so the masking rule
+  // below fires on it: it contains `back`, a heading word, and without the mask
+  // "further back" set the rule and then also drove the robot south.
+  // `not`: 'further' is a substring of 'furthest', which is a TARGET word
+  // ("shoot the furthest one") — the superlative must not silently become a
+  // doctrine change. Same for farther/farthest.
+  { kind: 'keep_distance', any: ['keep your distance', 'keep distance', 'keep back', 'stay back', 'back off', 'dont get too close', 'do not get too close', 'not too close', 'too close', 'not that close', 'fight from range', 'shoot from far', 'from a distance', 'at range', 'kite', 'further back', 'farther back', 'further', 'farther', 'more distance', 'more space', 'more room'], not: ['furthest', 'farthest'] },
+  // NO bare 'close': it is a substring of focus_nearest's "closest", and one
+  // player saying "kill the closest one" would silently turn into a charge.
+  { kind: 'close_in', any: ['get closer', 'get close', 'in its face', 'in their face', 'in his face', 'point blank', 'up close', 'close in', 'charge them', 'right up to'], not: ['dont get', 'do not get', 'never get', 'not too close'] },
+  { kind: 'dodge_projectiles', any: ['red circle', 'red circles', 'the circles', 'dodge the rocket', 'avoid the rocket', 'dodge the mortar', 'avoid the mortar', 'watch the ground', 'mind the ground', 'off the ground', 'dont get hit', 'do not get hit', 'dont get blown'], not: ['ignore the', 'dont worry'] },
+  { kind: 'ignore_projectiles', any: ['ignore the circles', 'ignore the rockets', 'ignore the red', 'ignore the ground'] },
+  { kind: 'keep_moving', any: ['keep moving', 'dont stop moving', 'do not stop moving', 'never stop moving', 'dont stand still', 'run around the map', 'run around', 'strafe', 'circle them', 'circle around', 'keep dancing'] },
+  { kind: 'hold_ground', any: ['hold your ground', 'hold ground', 'stand your ground', 'stand still', 'stop moving around', 'stay in one place', 'plant yourself'], not: ['dont stand still', 'do not stand still', 'never stand still', 'dont stop moving', 'do not stop moving'] },
+  { kind: 'focus_dangerous', any: ['big one first', 'biggest first', 'kill the big', 'most dangerous first', 'dangerous one first', 'worst one first', 'boss first', 'big ones first'] },
+  { kind: 'focus_nearest', any: ['nearest first', 'closest first', 'nearest one first', 'closest one first', 'whichever is closest'] },
+  { kind: 'use_rockets', any: ['use the rocket', 'use rockets', 'use your rocket', 'big gun', 'the launcher', 'big pew'] },
+  { kind: 'use_bolts', any: ['use the bolt', 'use bolts', 'small gun', 'little gun', 'normal gun', 'small pew'] },
+  // ---- end combat doctrine ------------------------------------------------
+  // `not`: "run away from the red circles" is a DODGE order, not a refusal to
+  // fight. Without this it fires both and the last one written wins, which is
+  // how the operator ends up sneaking past a boss they meant to shoot at.
+  { kind: 'avoid_enemies', any: ['avoid the enemies', 'avoid enemies', 'avoid the machines', 'avoid machines', 'avoid the printers', 'avoid printers', 'dont fight', 'no fighting', 'stop fighting', 'stay away from them', 'run away from', 'avoid them', 'dodge them'], not: ['red circle', 'the circles', 'rocket', 'mortar', 'the ground', 'the blast'] },
   // 'fight_enemies' is now "go LOOKING for a fight" (Standing.hunt), not mere
   // self-defence — that is on by default. So the phrases here must all be the
   // aggressive kind; nothing here should fire for "shoot back if they come".
@@ -224,15 +273,108 @@ const DIRECTIVE_ACK: Record<DirectiveKind, string> = {
   bold: 'ROBOT STOPS SNEAKING. LOUD.',
   act_alone: 'ROBOT DECIDES THINGS NOW.',
   wait_for_orders: 'ROBOT WAITS FOR VOICE.',
+  keep_distance: 'ROBOT STAYS BACK. SHOOTS FROM FAR.',
+  close_in: 'ROBOT GETS CLOSE. VERY CLOSE.',
+  dodge_projectiles: 'ROBOT DODGES. ROBOT IS SLIPPERY.',
+  ignore_projectiles: 'ROBOT IGNORES FLYING THINGS. BRAVE.',
+  keep_moving: 'ROBOT NEVER STOPS. ROBOT ZOOMS.',
+  hold_ground: 'ROBOT STANDS HERE. LIKE TREE.',
+  focus_dangerous: 'BIG ONE DIES FIRST.',
+  focus_nearest: 'ROBOT FIGHTS NEAREST. TIDY.',
+  use_rockets: 'ROBOT USES BIG PEW PEW.',
+  use_bolts: 'ROBOT USES SMALL PEW.',
 };
+
+/**
+ * One rule as a bare verb phrase, for the case where the operator changed TWO
+ * things in one breath. "keep your distance and dodge the rockets" answered
+ * with only the first rule's ack is the player's evidence that the second one
+ * was dropped — they will say it again, mid-fight, and be right to. Two short
+ * sentences keep every clause inside the ≤7-word law.
+ */
+const DIRECTIVE_CLAUSE: Record<DirectiveKind, string> = {
+  avoid_enemies: 'AVOIDS MACHINES',
+  fight_enemies: 'HUNTS MACHINES',
+  avoid_hazards: 'WATCHES FLOOR',
+  ignore_hazards: 'IGNORES FLOOR',
+  gather: 'TAKES SHINY',
+  no_gather: 'LEAVES SHINY',
+  careful: 'IS QUIET',
+  bold: 'IS LOUD',
+  act_alone: 'DECIDES THINGS',
+  wait_for_orders: 'WAITS FOR VOICE',
+  keep_distance: 'KEEPS BACK',
+  close_in: 'GETS CLOSE',
+  dodge_projectiles: 'DODGES',
+  ignore_projectiles: 'IGNORES CIRCLES',
+  keep_moving: 'NEVER STOPS',
+  hold_ground: 'STANDS STILL',
+  focus_dangerous: 'KILLS BIG ONE',
+  focus_nearest: 'KILLS NEAR ONE',
+  use_rockets: 'USES BIG PEW',
+  use_bolts: 'USES SMALL PEW',
+};
+
+/** The ack for a pure rule change: one rule speaks in full, two speak in short
+ *  clauses so the operator hears that BOTH stuck. */
+function directiveAck(kinds: readonly DirectiveKind[]): string {
+  if (kinds.length <= 1) return DIRECTIVE_ACK[kinds[0]!];
+  return kinds
+    .slice(0, 2)
+    .map((k) => `ROBOT ${DIRECTIVE_CLAUSE[k]}.`)
+    .join(' ');
+}
 
 /** Nouns that make "avoid X" a category rule instead of one named target. */
 const ENEMY_NOUNS = new Set(['enemy', 'enemies', 'machine', 'machines', 'printers', 'them', 'everything', 'trouble', 'danger', 'monsters', 'bad']);
 
 const HIDE_WORDS = new Set(['hide', 'hides', 'hiding', 'cover', 'vanish']);
 const HIDE_PHRASES = ['take cover', 'get behind', 'go behind'];
+/**
+ * RUN. The word the game had no reading for at all, which is why "run", "flee",
+ * "retreat" and "get away from it" all came back as a shrug and the operator
+ * concluded the robot was not listening.
+ *
+ * Unambiguous by themselves — none of these is a heading, a target or a rule.
+ * 'run' is deliberately NOT here; see RUN_WORDS.
+ */
+const FLEE_WORDS = new Set([
+  'flee', 'fleeing', 'escape', 'retreat', 'retreats', 'retreating',
+  'withdraw', 'disengage', 'abort', 'bail', 'scram', 'evacuate', 'evac', 'runaway',
+]);
+const FLEE_PHRASES = [
+  'run away', 'run for it', 'get out of there', 'get out of here', 'get outta',
+  'get away', 'get out', 'get clear', 'fall back', 'pull back', 'back away',
+  'back off', 'leg it', 'bug out', 'save yourself', 'run robot',
+];
+/**
+ * ...and the same guard avoid_enemies carries. "run away from the red circles"
+ * is a DODGE rule, not a decision to leave the fight: answering it by actually
+ * running costs the operator the fight they were in the middle of winning.
+ */
+const FLEE_NOT = ['red circle', 'the circles', 'rocket', 'mortar', 'the ground', 'the blast'];
+/**
+ * Bare "run" is the one that needs care, because it is three different
+ * sentences: a flight ("run!"), a stance ("run around the map" → keep_moving),
+ * and a heading or an errand ("run left", "run to the crate" — 'run' is a
+ * GOTO_VERB). So it only means flight once every other reading has been ruled
+ * out: no heading, no named thing, no elevator, and none of RUN_NOT.
+ */
+const RUN_WORDS = new Set(['run', 'runs', 'running']);
+const RUN_NOT = ['run around', 'run about', 'run in circles', 'run laps'];
 const AVOID_WORDS = new Set(['avoid', 'avoids']);
-const AVOID_PHRASES = ['stay away', 'keep away', 'dont touch', 'dont go near', 'stay clear', 'steer clear'];
+/**
+ * "go around the cables" used to parse as `goto cable1` — the goto verb won and
+ * the word doing all the work was dropped, so the offline path drove the robot
+ * INTO the thing it was told to route around. Anything meaning "past it, not to
+ * it" has to out-rank the verb, which is why these live here and are tested
+ * before the goto branch.
+ */
+const AVOID_PHRASES = [
+  'stay away', 'keep away', 'dont touch', 'dont go near', 'stay clear', 'steer clear',
+  'go around', 'walk around', 'drive around', 'route around', 'get around',
+  'go round', 'walk round', 'around the', 'other way', 'the long way', 'not through',
+];
 const CAREFUL_WORDS = new Set([
   'sneak', 'sneaks', 'sneaky', 'careful', 'carefully', 'quiet', 'quietly', 'slowly', 'gently', 'cautious',
 ]);
@@ -249,7 +391,7 @@ const MAX_PLAN = 4;
 const COUNT_SPOKEN = ['ZERO', 'ONE', 'TWO', 'THREE', 'FOUR', 'FIVE'];
 /** Intents a plan may hold (commands only, no meta). */
 const CHAINABLE = new Set<IntentType>([
-  'move', 'stop', 'shoot', 'goto', 'attack', 'pickup', 'enter_elevator', 'explore', 'hide', 'avoid',
+  'move', 'stop', 'shoot', 'goto', 'attack', 'pickup', 'enter_elevator', 'explore', 'hide', 'flee', 'avoid',
 ]);
 
 // ---------------------------------------------------------------- helpers
@@ -321,6 +463,93 @@ function synonymEntity(tokens: string[], entities: ParseEntity[]): ParseEntity |
     if (best) return best;
   }
   return null;
+}
+
+/**
+ * Pointing with an adjective instead of a name: "the big one", "the little
+ * one", "the one shooting", "the nearest". Hostiles only — `rank` (1 = worst)
+ * and `size` are populated by visibleEntities() for live hostiles and are
+ * absent on everything else, so this needs no kind list of its own.
+ *
+ * Two guards keep it from eating ordinary sentences. A non-hostile noun in the
+ * line ("the big CRATE") hands it straight back to the label matcher, and a
+ * bare adjective with no noun and no attack verb ("nearest first" — a RULE, not
+ * a target) resolves to nothing at all. With zero hostiles visible it always
+ * returns null, so a superlative never becomes a mysterious miss.
+ */
+const SUP_BIG = new Set([
+  'big', 'bigger', 'biggest', 'large', 'larger', 'largest', 'huge', 'giant',
+  'boss', 'dangerous', 'worst', 'scary', 'scariest', 'nastiest', 'toughest',
+]);
+const SUP_SMALL = new Set(['little', 'small', 'smaller', 'smallest', 'tiny', 'weakest', 'weedy']);
+const SUP_NEAR = new Set(['nearest', 'closest', 'nearby']);
+const SUP_FAR = new Set(['farthest', 'furthest']);
+/** Phrases that mean "whatever is currently doing something to us" → rank 1. */
+const SUP_ACTIVE = ['one shooting', 'one thats shooting', 'one attacking', 'shooting at', 'hitting us', 'hitting you'];
+/** A superlative is a TARGET only when it has one of these to be about. */
+const SUP_NOUNS = new Set([
+  'one', 'ones', 'thing', 'things', 'machine', 'machines', 'printer', 'printers',
+  'shredder', 'shredders', 'enemy', 'enemies', 'monster', 'monsters', 'baddie', 'guy',
+]);
+/**
+ * ...and any of these in the line means the player is talking about scenery,
+ * not a machine. "the big crate" must stay a crate even while three printers
+ * are awake, which is exactly when the superlative path is most tempting.
+ */
+const NON_HOSTILE_WORDS = new Set([
+  'crate', 'crates', 'box', 'boxes', 'chest', 'container', 'present', 'package', 'cube',
+  'chip', 'chips', 'upgrade', 'module', 'card', 'scrap', 'shiny', 'junk', 'metal', 'loot', 'bits',
+  'cable', 'cables', 'wire', 'wires', 'spark', 'sparks', 'electricity',
+  'elevator', 'elevators', 'lift', 'lifts', 'exit', 'door', 'doors', 'doorway',
+  'fuse', 'socket', 'mop', 'chair', 'pile', 'debris', 'heap', 'room', 'floor', 'wall',
+  'gun', 'guns', 'rocket', 'rockets', 'bolt', 'bolts', 'circle', 'circles',
+]);
+/** Deictic stand-ins: the player is pointing at something they can see. */
+const DEICTIC = new Set(['it', 'that', 'this', 'them', 'those', 'him', 'her', 'one', 'thing', 'things', 'guy']);
+
+function sizeRank(e: ParseEntity): number {
+  return e.size === 'boss' ? 2 : e.size === 'big' ? 1 : 0;
+}
+
+/** Live hostiles, in whatever order visibleEntities listed them. */
+function hostilesOf(entities: ParseEntity[]): ParseEntity[] {
+  return entities.filter((e) => e.rank !== undefined);
+}
+
+/** Rank 1 — the thing most likely to kill the robot next. */
+function worstHostile(entities: ParseEntity[]): ParseEntity | null {
+  const hs = hostilesOf(entities);
+  if (hs.length === 0) return null;
+  return hs.reduce((a, b) => (a.rank! <= b.rank! ? a : b));
+}
+
+function superlativeHostile(text: string, tokens: string[], entities: ParseEntity[]): ParseEntity | null {
+  const hs = hostilesOf(entities);
+  if (hs.length === 0) return null;
+  if (tokens.some((t) => NON_HOSTILE_WORDS.has(t))) return null;
+  if (SUP_ACTIVE.some((p) => text.includes(p))) return worstHostile(entities);
+  const big = tokens.some((t) => SUP_BIG.has(t));
+  const small = tokens.some((t) => SUP_SMALL.has(t));
+  const near = tokens.some((t) => SUP_NEAR.has(t));
+  const far = tokens.some((t) => SUP_FAR.has(t));
+  if (!big && !small && !near && !far) return null;
+  if (!tokens.some((t) => SUP_NOUNS.has(t)) && !tokens.some((t) => ATTACK_VERBS.has(t))) return null;
+  if (near) return hs.reduce((a, b) => ((a.dist ?? Infinity) <= (b.dist ?? Infinity) ? a : b));
+  if (far) return hs.reduce((a, b) => ((a.dist ?? -1) >= (b.dist ?? -1) ? a : b));
+  // Body class decides first, threat rank breaks the tie — so "the big one"
+  // still means something on a floor of identically-sized printers.
+  if (small) {
+    // Ties break on NEAREST, not on weakest: two identical printers on screen
+    // and "the little one" means the one the operator is looking at.
+    return hs.reduce((a, b) => {
+      const d = sizeRank(a) - sizeRank(b);
+      return d !== 0 ? (d < 0 ? a : b) : (a.dist ?? Infinity) <= (b.dist ?? Infinity) ? a : b;
+    });
+  }
+  return hs.reduce((a, b) => {
+    const d = sizeRank(a) - sizeRank(b);
+    return d !== 0 ? (d > 0 ? a : b) : a.rank! <= b.rank! ? a : b;
+  });
 }
 
 function matchEntity(tokens: string[], entities: ParseEntity[]): ParseEntity | null {
@@ -410,6 +639,24 @@ function toPlanStep(cmd: ParsedCommand): PlanStep {
   if (cmd.careful) step.careful = cmd.careful;
   if (cmd.target) step.target = cmd.target;
   return step;
+}
+
+/**
+ * Is this line the operator telling the robot to GET OUT? Runs on the whole
+ * line, not on detectDirectives' leftovers, because "back off" is both a flee
+ * phrase and a keep_distance phrase and the mask eats it (`back` is a heading
+ * word) before `rest` is built. Both readings are wanted: run now, keep back
+ * afterwards.
+ */
+function fleeAsk(text: string, tokens: string[], entities: ParseEntity[]): boolean {
+  if (FLEE_NOT.some((p) => text.includes(p))) return false;
+  if (tokens.some((t) => FLEE_WORDS.has(t))) return true;
+  if (FLEE_PHRASES.some((p) => text.includes(p))) return true;
+  if (!tokens.some((t) => RUN_WORDS.has(t))) return false;
+  if (RUN_NOT.some((p) => text.includes(p))) return false;
+  if (findDir(tokens) !== undefined) return false; // "run left" is a heading
+  if (tokens.some((t) => ELEVATOR_NOUNS.has(t))) return false;
+  return matchEntity(tokens, entities) === null; // "run to the crate" is an errand
 }
 
 function entLabel(e: ParseEntity): string {
@@ -536,7 +783,8 @@ function interpretOne(
   const hideAsk = tokens.some((t) => HIDE_WORDS.has(t)) || HIDE_PHRASES.some((p) => text.includes(p));
   const avoidAsk = tokens.some((t) => AVOID_WORDS.has(t)) || AVOID_PHRASES.some((p) => text.includes(p));
   const carefulAsk = tokens.some((t) => CAREFUL_WORDS.has(t));
-  const directives = detectDirectives(text);
+  const { kinds: directives, rest } = detectDirectives(text);
+  const restTokens = rest.length > 0 ? rest.split(' ') : [];
 
   // "avoid the enemies" is a standing POLICY; "avoid that printer" names one
   // thing. Reading the first as the second is how a rule evaporates after one
@@ -558,8 +806,17 @@ function interpretOne(
     if (directives.length > 0) cmd.directives = directives;
     return cmd;
   }
+  // After hide ("run and hide" is a hide) and before every heuristic below it:
+  // half this vocabulary would otherwise be read as a heading ('back off',
+  // 'fall back') or as an errand with a missing noun ('get away' → PICKUP_VERB
+  // → "WHICH THING?"), which is exactly how it failed in the playtest.
+  if (fleeAsk(text, tokens, ctx.entities)) {
+    const cmd: ParsedCommand = { intent: 'flee', ack_line: 'ROBOT RUNS AWAY. TACTICAL.' };
+    if (directives.length > 0) cmd.directives = directives;
+    return cmd;
+  }
 
-  const cmd = command(text, tokens, ctx, insult);
+  const cmd = command(rest, restTokens, ctx, insult);
   if (carefulAsk && (cmd.intent === 'move' || cmd.intent === 'goto' || cmd.intent === 'pickup')) {
     cmd.careful = true;
     cmd.ack_line = 'ROBOT SNEAKS. VERY QUIET.';
@@ -568,19 +825,49 @@ function interpretOne(
     cmd.directives = directives;
     if (cmd.intent === 'chatter' || cmd.intent === 'clarify') {
       cmd.intent = 'directive';
-      cmd.ack_line = DIRECTIVE_ACK[directives[0]];
+      cmd.ack_line = directiveAck(directives);
     }
   }
   return cmd;
 }
 
-/** Standing rules named anywhere in the line — deduped, capped. */
-function detectDirectives(text: string): DirectiveKind[] {
+/**
+ * Standing rules named anywhere in the line — deduped, capped — plus what is
+ * LEFT of the line once the rule phrasing is taken out of it.
+ *
+ * The masking is the fix for a whole family of collisions. "stay back" is a
+ * rule, but `stay` is in STOPS and `back` is in DIR_WORDS, so it used to halt
+ * the robot mid-fight and then, failing that, drive it south. The old
+ * `stopIsRule` guard only covered phrases that STARTED with "stop", so it
+ * caught "stop picking things up" and missed "stay back", "stay put",
+ * "no fighting" and "wait for me" — every one of which stopped the robot dead
+ * while claiming to have set a policy.
+ *
+ * So: a matched rule phrase that contains a halt word or a heading word is cut
+ * out of the text before the command heuristics ever see it. Phrases with
+ * neither are left in place, because they are already unambiguous and the
+ * readings that ride on them ("do whatever you want" is act_alone AND explore)
+ * are worth keeping.
+ */
+function detectDirectives(text: string): { kinds: DirectiveKind[]; rest: string } {
   const out: DirectiveKind[] = [];
+  let rest = text;
   for (const d of DIRECTIVE_PHRASES) {
-    if (d.any.some((p) => text.includes(p))) out.push(d.kind);
+    if (d.not?.some((p) => text.includes(p))) continue;
+    let hit = false;
+    for (const p of d.any) {
+      if (!text.includes(p)) continue;
+      hit = true;
+      if (p.split(' ').some((w) => STOPS.has(w) || DIR_WORDS[w] !== undefined)) {
+        rest = rest.split(p).join(' ');
+      }
+    }
+    if (hit) out.push(d.kind);
   }
-  return [...new Set(out)].slice(0, 4);
+  return {
+    kinds: [...new Set(out)].slice(0, 4),
+    rest: rest.replace(/\s+/g, ' ').trim(),
+  };
 }
 
 /** Pre-BRAIN heuristics (negation/dir/stop/help/targets/shoot/chatter), unchanged family. */
@@ -603,12 +890,11 @@ function command(
   }
 
   const dir = findDir(tokens);
-  // A "stop" that belongs to a standing rule ("stop picking things up", "stop
-  // fighting") is not a halt order — it changes the rules and the robot keeps
-  // walking. Only a bare stop stops. "stop moving" is not a rule, so it still does.
-  const stopIsRule = DIRECTIVE_PHRASES.some((d) =>
-    d.any.some((p) => p.startsWith('stop') && text.includes(p)),
-  );
+  // NOTE: there is no `stopIsRule` guard here any more. detectDirectives cuts
+  // rule phrasing containing a halt or heading word out of the text before this
+  // ever runs, so "stop picking things up", "stay back" and "wait for me"
+  // arrive here already stripped. A bare "stop" — or "stop moving", which is
+  // not a rule — still reaches STOPS untouched and still halts instantly.
   const amount = tokens.some((t) => STEP_WORDS.has(t))
     ? ('step' as const)
     : tokens.some((t) => BIT_WORDS.has(t))
@@ -640,7 +926,7 @@ function command(
     return { intent: 'explore', ack_line: 'ROBOT EXPLORES. ROBOT IS BRAVE.' };
   }
 
-  if (!stopIsRule && tokens.some((t) => STOPS.has(t))) {
+  if (tokens.some((t) => STOPS.has(t))) {
     return { intent: 'stop', ack_line: 'ROBOT STOPS.' };
   }
 
@@ -681,11 +967,16 @@ function command(
 
   // tier 1+: named targets
   if (ctx.tier >= 1) {
-    const ent = matchEntity(tokens, ctx.entities);
+    // Superlatives OUTRANK the label match on purpose: "the big printer" on a
+    // floor of printers means the biggest one, and answering with the nearest
+    // one is the robot ignoring the only word in the sentence that mattered.
+    const sup = superlativeHostile(text, tokens, ctx.entities);
+    const ent = sup ?? matchEntity(tokens, ctx.entities);
     // Elevator first: "take the exit" / "get in the lift" name no label at all,
     // and even a label-matched elevator has to go through the A/B rule before
-    // it becomes an order.
-    if (elevatorAsk(tokens, ent)) {
+    // it becomes an order. (A superlative can never be an elevator ask — any
+    // elevator word disqualifies the superlative reading outright.)
+    if (!sup && elevatorAsk(tokens, ent)) {
       const elev = resolveElevator(tokens, ctx.entities);
       if (elev) return enterElevator(elev);
     }
@@ -701,6 +992,15 @@ function command(
     }
   }
 
+  // Deictic attack: "shoot it", "kill that thing", "get him". The operator is
+  // pointing at something on the feed that we could not put a name to, and
+  // "WHICH THING?" while a machine is chewing on the robot is the worst
+  // possible moment to ask for precision. Rank 1 is what they meant.
+  if (tokens.some((t) => ATTACK_VERBS.has(t)) && tokens.some((t) => DEICTIC.has(t))) {
+    const worst = worstHostile(ctx.entities);
+    if (worst) return { intent: 'attack', target: worst.id, ack_line: `ROBOT SHOOTS ${entLabel(worst)}.` };
+  }
+
   if (tokens.some((t) => SHOOTS.has(t))) {
     return { intent: 'shoot', ack_line: 'ROBOT SHOOTS. PEW PEW.' };
   }
@@ -711,6 +1011,14 @@ function command(
   if (tokens.some((t) => ELEVATOR_NOUNS.has(t))) {
     const elev = resolveElevator(tokens, ctx.entities);
     if (elev) return enterElevator(elev);
+  }
+
+  // CONVERSATION beats a shrug. A recognised topic ("how are you", "are you
+  // scared", "what is this place") is answered properly even though it looks
+  // like nothing the command matcher wants — this is the branch that stops the
+  // keyless robot being a thing you can only issue orders to.
+  if (!insult && smallTalk(text, { name: 'ROBOT', recent: [], calm: true }).matched) {
+    return chat(text, ctx);
   }
 
   // target-ish verb with nothing resolvable → in-character ask-again
@@ -728,5 +1036,8 @@ function command(
   }
 
   if (insult) return { intent: 'chatter', ack_line: 'VOICE IS MEAN. ROBOT SULKS NOW.' };
-  return { intent: 'chatter', ack_line: 'ROBOT HEARS VOICE. ROBOT WAITS.' };
+  // Real words, no command in them. Answer as conversation rather than with the
+  // old "ROBOT HEARS VOICE. ROBOT WAITS." — which was true, and was also the
+  // reason the robot felt like something you could not talk to.
+  return chat(text, ctx);
 }

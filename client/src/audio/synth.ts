@@ -177,4 +177,42 @@ export const FALLBACKS: Record<SfxName, (s: Synth) => void> = {
     s.tone('sine', 55, 110, 1.3, 0.28);
     s.tone('sine', 110, 221, 1.3, 0.12, 0.05);
   },
+  // Ordnance. The shredder throws paper and toner, so the whole ladder is dry
+  // and grey — lowpassed noise over a descending body, never a fire whoosh.
+  mortar_launch: (s) => {
+    s.tone('sine', 150, 60, 0.14, 0.4); // hollow tube thump
+    s.tone('sine', 300, 900, 0.5, 0.07, 0.06); // shell winding up and away
+  },
+  mortar_warn: (s) => {
+    s.tone('square', 1400, 1400, 0.06, 0.16);
+    s.tone('square', 1400, 1400, 0.06, 0.16, 0.12);
+  },
+  boom_small: (s) => {
+    s.tone('sine', 180, 40, 0.28, 0.3);
+    s.noise(0.22, 0.24, 'lowpass', 1100, 0.7);
+  },
+  boom_big: (s) => {
+    s.tone('sine', 130, 28, 0.5, 0.4);
+    s.noise(0.45, 0.3, 'lowpass', 800, 0.7);
+    s.noise(0.3, 0.14, 'highpass', 2600, 0.6, 0.02); // paper shrapnel
+  },
+  boom_huge: (s) => {
+    s.tone('sine', 95, 22, 0.9, 0.5);
+    s.noise(0.8, 0.34, 'lowpass', 600, 0.8);
+    s.noise(0.6, 0.16, 'bandpass', 1800, 0.5, 0.05);
+    s.tone('sawtooth', 300, 30, 0.7, 0.12, 0.1); // the machine coming apart
+  },
+  rocket_fire: (s) => {
+    s.noise(0.3, 0.28, 'highpass', 900, 0.6);
+    s.tone('sawtooth', 700, 160, 0.26, 0.16);
+  },
+  boss_roar: (s) => {
+    s.tone('sawtooth', 90, 55, 1.1, 0.34, 0, [11, 18]);
+    s.tone('sawtooth', 134, 82, 1.1, 0.18, 0.02, [7, 12]); // detuned twin
+    s.noise(0.9, 0.12, 'lowpass', 700, 0.8, 0.05);
+  },
+  alarm: (s) => {
+    s.tone('square', 620, 620, 0.32, 0.14);
+    s.tone('square', 460, 460, 0.32, 0.14, 0.34);
+  },
 };

@@ -3,7 +3,9 @@
  * bit-identical JSON state every tick. Also sanity-checks floor maps and the
  * pinned entity ids the director depends on.
  */
-import type { SimState } from '../../../shared/types';
+import type { SimState, Vec } from '../../../shared/types';
+import { TILE, TILES_X, TILES_Y } from '../../../shared/types';
+import { ALL_TALK_LINES, smallTalk } from '../../../shared/smallTalk';
 import { FLOORS, buildSolid } from './floors';
 import {
   addAvoid,
@@ -18,26 +20,39 @@ import {
   wakeRobot,
 } from './index';
 import { findPath } from './pathfind';
-import { dist, solidAtPx } from './physics';
-import { CRATE_NOTICE, ROBOT_R } from './internal';
+import { dist, isSolidTile, solidAtPx } from './physics';
+import { CRATE_NOTICE, HOSTILE_KINDS, ROBOT_R, radiusOf, wakeMachine } from './internal';
+import { MAX_ADDS, SPAWN_CLEAR_ROBOT, SPAWN_EVERY } from './boss';
 
 const TICKS = 600;
 
 /** Indexed by floor. Moves with the running order in floors.ts. */
 const PINNED_IDS: string[][] = [
   ['elevA', 'elevB', 'pile1', 'pile2', 'scrap1'], // 1 opening
-  ['elevA', 'elevB', 'chip_memory', 'scrap1', 'scrap2'], // 2 memory chip
+  ['elevA', 'elevB', 'chip_memory'], // 2 memory chip — deliberately nothing else
   ['elevA', 'elevB', 'cable1', 'cable2', 'scrap1', 'scrap2'], // 3 movement
   ['elevA', 'elevB', 'crate_BRAIN', 'printer1', 'cable1', 'mop1'], // 4 gauntlet
   ['elevA', 'elevB', 'fuse1', 'socket1', 'printer1', 'printer2', 'printer3', 'printer_nice', 'cable1'], // 5 fuse run
+  // 6 boss arena. This row is not optional: runSelftest indexes PINNED_IDS by
+  // floor, so a floor appended without one crashes the suite on undefined
+  // rather than reporting anything a reader could act on.
+  // The four corner printers are GONE: the shredder prints its own adds now
+  // (`bossAdd` in floors.ts, SPAWN_EVERY in boss.ts), so there is nothing
+  // authored here to pin. Their ids were `printer1`..`printer4`; the spawned
+  // ones are `add_<n>` and belong to the fight, not to the floor.
+  ['elevA', 'elevB', 'boss1', 'crate_ROCKET', 'chair1'],
 ];
 
 /** Floor INDICES the behaviour tests reach for by name, so a reshuffle of the
- *  running order is a one-line edit here instead of a hunt through the file. */
+ *  running order is a one-line edit here instead of a hunt through the file.
+ *  The boss floor is appended at index 5, which is why these all still hold. */
 const FLOOR_ISLAND_I = 1; // the island that blocks the straight A→B line
 const FLOOR_MOVEMENT_I = 2; // two doors, one wired
 const FLOOR_GAUNTLET_I = 3; // roaming printer, open colonnade
 const FLOOR_MACHINE_I = 4; // three machines and the fuse run
+/** Floors the shipping run actually plays. Index 5 is the trailer-only boss
+ *  arena, reached by `?floor=6` and never by clearing floor 5. */
+const AUTHORED_FLOORS = 5;
 
 /** Scripted order sequence — exercises movement, nudges, chips, combat, rng, floor load. */
 function script(t: number, s: SimState): void {
@@ -331,6 +346,173 @@ function cratesAreSomewhereToWalkTo(): string | null {
   return null;
 }
 
+// ------------------------------------------------- enemy body fit (r=9, r=13)
+//
+// `floorsRoutable` above walks the floor at ROBOT_R, and the robot is a special
+// case: r=7 < TILE/2, so it fits in ANY non-wall tile. Enemies do not. A 1-tile
+// passage reads fine, routes fine and plays fine right up to the moment the
+// machine that is supposed to chase you through it cannot follow.
+//
+// tools/level-designer.html has checked this since the day it was written; the
+// BUILD never has, which left the browser tool stricter than the suite. Floor 6
+// is the first floor carrying a body wider than r=9, so the gap stops being
+// theoretical exactly now.
+//
+// Sampled on a 4px grid rather than per tile, because a body far wider than a
+// tile stands BETWEEN tile centres far more often than on one — the boss's only
+// way through a 3-tile lane is up the middle of it.
+
+const FIT_SAMP = 4;
+const FIT_W = (TILES_X * TILE) / FIT_SAMP;
+const FIT_H = (TILES_Y * TILE) / FIT_SAMP;
+
+function circleTileOverlap(cx: number, cy: number, r: number, tx: number, ty: number): boolean {
+  const nx = Math.max(tx * TILE, Math.min(cx, tx * TILE + TILE));
+  const ny = Math.max(ty * TILE, Math.min(cy, ty * TILE + TILE));
+  return (cx - nx) ** 2 + (cy - ny) ** 2 < r * r;
+}
+
+/** True when a body of radius r can STAND at (x,y) without overlapping a wall. */
+function bodyFits(solid: boolean[][], x: number, y: number, r: number): boolean {
+  for (let ty = Math.floor((y - r) / TILE); ty <= Math.floor((y + r) / TILE); ty++) {
+    for (let tx = Math.floor((x - r) / TILE); tx <= Math.floor((x + r) / TILE); tx++) {
+      if (!isSolidTile(solid, tx, ty)) continue;
+      if (circleTileOverlap(x, y, r, tx, ty)) return false;
+    }
+  }
+  return true;
+}
+
+/** Every 4px sample a body of radius r can stand on. */
+function fitField(solid: boolean[][], r: number): Uint8Array {
+  const fit = new Uint8Array(FIT_W * FIT_H);
+  for (let j = 0; j < FIT_H; j++) {
+    for (let i = 0; i < FIT_W; i++) {
+      const x = i * FIT_SAMP + FIT_SAMP / 2;
+      const y = j * FIT_SAMP + FIT_SAMP / 2;
+      fit[j * FIT_W + i] = bodyFits(solid, x, y, r) ? 1 : 0;
+    }
+  }
+  return fit;
+}
+
+/** Flood fill of the standable samples reachable from `from`; null = wedged. */
+function fitReach(fit: Uint8Array, from: Vec): Uint8Array | null {
+  const ci = Math.min(FIT_W - 1, Math.max(0, Math.round((from.x - FIT_SAMP / 2) / FIT_SAMP)));
+  const cj = Math.min(FIT_H - 1, Math.max(0, Math.round((from.y - FIT_SAMP / 2) / FIT_SAMP)));
+  if (fit[cj * FIT_W + ci] !== 1) return null;
+  const seen = new Uint8Array(FIT_W * FIT_H);
+  const queue = new Int32Array(FIT_W * FIT_H);
+  let head = 0;
+  let tail = 0;
+  const start = cj * FIT_W + ci;
+  queue[tail++] = start;
+  seen[start] = 1;
+  while (head < tail) {
+    const cur = queue[head++];
+    const i = cur % FIT_W;
+    const j = (cur - i) / FIT_W;
+    for (const n of [
+      i > 0 ? cur - 1 : -1,
+      i < FIT_W - 1 ? cur + 1 : -1,
+      j > 0 ? cur - FIT_W : -1,
+      j < FIT_H - 1 ? cur + FIT_W : -1,
+    ]) {
+      if (n < 0 || seen[n] === 1 || fit[n] === 0) continue;
+      seen[n] = 1;
+      queue[tail++] = n;
+    }
+  }
+  return seen;
+}
+
+/** Did the flood fill get a body within ~1.5 tiles of `to`? Elevators and the
+ *  spawn tile are places to CONTEST, not places a wide body has to stand on. */
+function fitReaches(seen: Uint8Array, to: Vec): boolean {
+  const ci = Math.round((to.x - FIT_SAMP / 2) / FIT_SAMP);
+  const cj = Math.round((to.y - FIT_SAMP / 2) / FIT_SAMP);
+  const span = 6; // 6 samples = 24px = 1.5 tiles
+  for (let dj = -span; dj <= span; dj++) {
+    for (let di = -span; di <= span; di++) {
+      const i = ci + di;
+      const j = cj + dj;
+      if (i < 0 || j < 0 || i >= FIT_W || j >= FIT_H) continue;
+      if (seen[j * FIT_W + i]) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Every hostile must physically fit where it spawns, and be able to come at the
+ * robot and contest the exit — at ITS OWN width, not the robot's. A machine
+ * that cannot reach the spawn is a machine the floor can never send at you; one
+ * that cannot reach elevator B can be walked away from forever.
+ *
+ * Runs on every floor, at whatever radius each kind actually has, so the boss
+ * arena is checked at r=13 without the earlier floors needing a special case.
+ */
+function bossArenaFitsEnemies(): string | null {
+  for (let i = 0; i < FLOORS.length; i++) {
+    const def = FLOORS[i];
+    const solid = buildSolid(def.map);
+    const ents = def.entities();
+    const spawn = def.spawn ?? ents.find((e) => e.id === 'elevA')!.pos;
+    const exit = ents.find((e) => e.id === 'elevB')?.pos ?? null;
+    // One field per radius per floor — 30×16 tiles at 4px is nothing, and two
+    // bodies of the same width share the same answer.
+    const fields = new Map<number, Uint8Array>();
+    for (const e of ents) {
+      if (!HOSTILE_KINDS.has(e.kind)) continue;
+      const r = radiusOf(e);
+      let fit = fields.get(r);
+      if (!fit) {
+        fit = fitField(solid, r);
+        fields.set(r, fit);
+      }
+      if (!bodyFits(solid, e.pos.x, e.pos.y, r)) {
+        return `FAIL: floor index ${i} '${e.id}' is wedged — an r=${r} body does not fit where it spawns`;
+      }
+      const seen = fitReach(fit, e.pos);
+      if (!seen) return `FAIL: floor index ${i} '${e.id}' has nowhere to stand at r=${r}`;
+      if (!fitReaches(seen, spawn)) {
+        return `FAIL: floor index ${i} '${e.id}' cannot reach the robot spawn at r=${r} — a passage on the way is too narrow for its body`;
+      }
+      if (exit && !fitReaches(seen, exit)) {
+        return `FAIL: floor index ${i} '${e.id}' cannot reach elevator B at r=${r} — it can never contest the way out`;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * The boss floor must not touch the run it was appended to. Nothing before it
+ * may grow a shredder or a mortar, however the boss stream later wires those
+ * up: `?floor=6` is a side door, not a sixth act.
+ *
+ * Cheap insurance, and it fails loudly the first time a boss system starts
+ * spawning off a tick counter instead of off the floor it is standing on.
+ */
+function bossFloorDoesNotLeak(): string | null {
+  for (let i = 0; i < AUTHORED_FLOORS; i++) {
+    const s = initialState(97 + i);
+    wakeRobot(s);
+    loadFloor(s, i);
+    clearBriefing(s);
+    for (let t = 0; t < 600; t++) {
+      step(s);
+      if (s.mortars.length !== 0) {
+        return `FAIL: floor index ${i} spawned a mortar at tick ${t} — the boss floor is leaking into the authored run`;
+      }
+      if (s.entities.some((e) => e.kind === 'fusedShredder')) {
+        return `FAIL: floor index ${i} grew a fusedShredder at tick ${t} — the boss floor is leaking into the authored run`;
+      }
+    }
+  }
+  return null;
+}
+
 /**
  * Floor 2 is the movement lesson and it only teaches if BOTH halves are true:
  * left alone the robot takes the wired door and gets bitten, and a standing
@@ -370,6 +552,73 @@ function floorTwoTeachesRouteChoice(): string | null {
   return null;
 }
 
+/**
+ * The shredder makes its own adds, and every one of the four ways that can go
+ * wrong is silent at runtime.
+ *
+ * Spawning is the one thing in this sim that writes to `state.entities` from
+ * inside a loop over `state.entities`, at a position it computed rather than
+ * one an author checked, for a machine that has to be awake to matter. A
+ * spawner that quietly puts printers inside walls, or on top of the robot, or
+ * uncapped, or asleep, still ticks along at 60Hz looking fine.
+ *
+ * The boss is held at full hp so this measures the SPAWNER and not the robot's
+ * damage output, and the robot is parked and made immortal so the window is a
+ * fixed number of print beats rather than however long it survived.
+ */
+function bossPrintsItsOwnAdds(): string | null {
+  const s = initialState(1234);
+  loadFloor(s, 5);
+  wakeRobot(s);
+  clearBriefing(s);
+  const boss = s.entities.find((e) => e.id === 'boss1');
+  if (!boss) return 'FAIL: the boss floor has no boss1';
+  wakeMachine(boss);
+  s.robot.standing.autonomy = false; // parked: this is not a fight test
+  setOrder(s, null);
+
+  const BEATS = 8;
+  const window = SPAWN_EVERY[0] * BEATS;
+  const born = new Set<string>();
+  let peak = 0;
+  let paper = 0;
+  for (let t = 0; t < window; t++) {
+    boss.hp = boss.maxHp ?? 0; // immortal, so the fight never leaves phase 1
+    s.robot.hp = s.robot.maxHp; // ...and so does the robot
+    const before = new Set(s.entities.map((e) => e.id));
+    step(s);
+    for (const e of s.entities) {
+      if (before.has(e.id) || e.id === 'boss1') continue;
+      if (born.has(e.id)) return `FAIL: the boss printed a duplicate id '${e.id}'`;
+      born.add(e.id);
+      if (!bodyFits(s.solid, e.pos.x, e.pos.y, radiusOf(e))) {
+        return `FAIL: the boss printed '${e.id}' inside a wall at ${Math.round(e.pos.x)},${Math.round(e.pos.y)}`;
+      }
+      if (dist(e.pos, s.robot.pos) < SPAWN_CLEAR_ROBOT) {
+        return `FAIL: the boss printed '${e.id}' ${Math.round(dist(e.pos, s.robot.pos))}px from the robot — an add that materialises inside contact range is an unavoidable hit`;
+      }
+      if (e.state === 'dormant') {
+        return `FAIL: the boss printed '${e.id}' asleep — an add the player has to wake for it is scenery`;
+      }
+    }
+    let live = 0;
+    for (const e of s.entities) if (!e.dead && HOSTILE_KINDS.has(e.kind) && e.id !== 'boss1') live++;
+    if (live > peak) peak = live;
+    for (const ev of s.events) if (ev.type === 'paper_thrown' && ev.id !== 'boss1') paper++;
+  }
+
+  if (born.size < 4) {
+    return `FAIL: the boss printed only ${born.size} adds in ${BEATS} beats — the tide the floor is built around is not arriving`;
+  }
+  if (peak > MAX_ADDS) {
+    return `FAIL: ${peak} concurrent adds, cap is ${MAX_ADDS} — an uncapped spawner is an unplayable swarm`;
+  }
+  if (paper === 0) {
+    return 'FAIL: the printed adds never attacked — they spawn awake and aggroed, so a silent one means the wake path is broken';
+  }
+  return null;
+}
+
 function snapshot(s: SimState): string {
   return JSON.stringify({
     t: s.tick,
@@ -392,6 +641,40 @@ function run(): { frames: string[]; events: number } {
     frames.push(snapshot(s));
   }
   return { frames, events };
+}
+
+/**
+ * The conversation bank still sounds like the robot.
+ *
+ * Talking at length is the one feature whose whole risk is voice drift: the
+ * temptation while writing warm replies is to let one sentence run long, and a
+ * single subordinate clause is enough for the robot to stop being a toddler and
+ * start being a chatbot. So the bank is checked mechanically, per sentence,
+ * against the same cap an ack lives under (CLAUDE.md rule 7).
+ */
+function talkStaysToddler(): string | null {
+  for (const line of ALL_TALK_LINES) {
+    // Entries may hold two short sentences; the cap is PER sentence.
+    for (const s of line.split(/(?<=[.!?])\s+/)) {
+      const words = s.replace(/[^A-Z0-9\s{}]/gi, ' ').split(/\s+/).filter(Boolean);
+      if (words.length === 0) return `FAIL: empty small-talk sentence in "${line}"`;
+      if (words.length > 7) return `FAIL: small-talk sentence over 7 words: "${s}"`;
+      if (/[,;:]| because | which | while | when /i.test(s)) {
+        return `FAIL: small-talk sentence has a subordinate clause: "${s}"`;
+      }
+      if (s !== s.toUpperCase()) return `FAIL: small-talk sentence not uppercase: "${s}"`;
+    }
+  }
+  // The two gates that make the feature safe: a topic answers, and a hostile in
+  // the room turns any topic into a deflection instead.
+  const ctx = { name: 'BEEP', recent: [] as string[], calm: true };
+  const warm = smallTalk('how are you', ctx);
+  if (!warm.matched || warm.lines.length < 2) return 'FAIL: "how are you" is not answered as conversation';
+  const busy = smallTalk('how are you', { ...ctx, calm: false });
+  if (busy.lines.some((l) => warm.lines.includes(l))) {
+    return 'FAIL: robot chats normally with a hostile awake';
+  }
+  return null;
 }
 
 export function runSelftest(): string {
@@ -418,6 +701,8 @@ export function runSelftest(): string {
   if (chipFail) return chipFail;
   const routeFail = floorsRoutable();
   if (routeFail) return routeFail;
+  const fitFail = bossArenaFitsEnemies();
+  if (fitFail) return fitFail;
   const navFail = routesAroundObstacles();
   if (navFail) return navFail;
   const initFail = actsOnItsOwn();
@@ -430,6 +715,12 @@ export function runSelftest(): string {
   if (crateFail) return crateFail;
   const lessonFail = floorTwoTeachesRouteChoice();
   if (lessonFail) return lessonFail;
+  const leakFail = bossFloorDoesNotLeak();
+  if (leakFail) return leakFail;
+  const addsFail = bossPrintsItsOwnAdds();
+  if (addsFail) return addsFail;
+  const talkFail = talkStaysToddler();
+  if (talkFail) return talkFail;
 
   // The opening beat only works if the robot really is inert until woken.
   const sleeping = initialState(7);
