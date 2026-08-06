@@ -150,10 +150,14 @@ const CSS = `
 .ro-wl-body { animation: ro-wl-glow 6.5s ease-in-out infinite; }
 .ro-wl-h {
   margin: 0;
-  /* 40px, not more: VT323 is monospace at 0.5em advance, so the 29-character
-     heading needs ~603px of the panel's 640px inner width. 44px overflows it
-     and wraps "AGAIN." onto a lonely second line. */
-  font-size: clamp(22px, 5.4vw, 40px);
+  /* 44px stays on one line — MEASURED in the browser, not calculated: VT323's
+     advance is 0.4em (16.0px at 40px), so the 29-character heading plus its
+     letter-spacing lays out 536px wide inside the 720px panel's 638px of inner
+     width. It survives to ~52px before wrapping. One caveat: on the zero-font
+     path the monospace fallback is 0.6em and the heading wraps above ~36px —
+     but it wraps gracefully (the panel grows, nothing overflows), so that is
+     not worth sizing the whole card around. */
+  font-size: clamp(22px, 5.4vw, 44px);
   line-height: 1.05;
   letter-spacing: 0.02em;
 }
