@@ -24,6 +24,15 @@ import {
  * and instant; the thinking dots run while this is in flight).
  */
 export const PARSE_TIMEOUT_MS = 3200;
+/**
+ * The audio path has an upload in front of it and a longer prefill behind it
+ * (a few seconds of speech is a few hundred audio tokens), so it gets its own
+ * budget. Still one round trip: transcription and interpretation are the SAME
+ * call, because the alternative — STT hop, then parse hop — is two mobile
+ * round trips for a robot that is supposed to answer while you are still
+ * holding the screen.
+ */
+export const PARSE_AUDIO_TIMEOUT_MS = 6500;
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const MODEL = 'google/gemini-2.5-flash';
@@ -32,6 +41,8 @@ const FALLBACK_MODELS = [
   'google/gemini-2.5-flash-lite',
   'openai/gpt-5-mini',
 ];
+/** Audio-in models only — gpt-5-mini would 400 on an input_audio part. */
+const AUDIO_MODELS = ['google/gemini-2.5-flash', 'google/gemini-2.5-flash-lite'];
 
 const RESPONSE_FORMAT = {
   type: 'json_schema',
@@ -42,7 +53,7 @@ const RESPONSE_FORMAT = {
       type: 'object',
       additionalProperties: false,
       required: [
-        'intent', 'dir', 'amount', 'steps', 'careful', 'target', 'choice', 'name', 'plan', 'directives', 'ack_line', 'insult', 'talk',
+        'intent', 'dir', 'amount', 'steps', 'careful', 'target', 'choice', 'name', 'plan', 'directives', 'ack_line', 'heard', 'insult', 'talk',
       ],
       properties: {
         intent: { type: 'string', enum: [...INTENTS] },
@@ -82,6 +93,9 @@ const RESPONSE_FORMAT = {
           items: { type: 'string', enum: [...DIRECTIVE_KINDS] },
         },
         ack_line: { type: 'string' },
+        // Audio path only: the plain transcript, for the dialogue log. Null on
+        // the text path, where the client already has the words.
+        heard: { type: ['string', 'null'] },
         insult: { type: ['boolean', 'null'] },
         // The conversation channel: several SHORT sentences, not one long one.
         talk: {
@@ -220,7 +234,28 @@ ANCHORS (follow exactly):
 
 Output ONE JSON object matching the schema. Unused fields null.`;
 
-type ChatMsg = { role: 'system' | 'user' | 'assistant'; content: string };
+/**
+ * Appended when the press arrives as sound instead of text (browsers with no
+ * speech recognition — every browser on iOS). The model does the listening
+ * itself, which is strictly better than the NOISY EARS section it replaces:
+ * there is no homophone mangling to undo when nothing transcribed it first.
+ */
+const AUDIO_PROMPT = `
+INPUT IS AUDIO. \`utterance\` is EMPTY and \`alternatives\` is empty. The operator's words are in the attached recording — a close mic in a quiet room, one short sentence, sometimes half a second of nothing at either end.
+- Listen, then interpret exactly as above. Everything in this prompt applies unchanged.
+- \`heard\` IS REQUIRED ON THIS PATH AND MUST NEVER BE NULL. Write down the operator's words verbatim: their sentence, not ROBOT's. Only an empty string, and only when the clip contains no speech at all.
+- The NOISY EARS rules are about mangled text and do NOT apply — you have the audio, so trust your own ears over any homophone table.
+- \`heard\` is context only. NEVER quote it in \`ack_line\` or \`talk\`, and never mention the recording, the audio quality, or that you listened.
+- Genuinely empty audio (breath, a bump, silence) -> intent "clarify" with \`heard\` "".`;
+
+/** A user message is either plain text or text + a recording. */
+type ChatContent =
+  | string
+  | Array<
+      | { type: 'text'; text: string }
+      | { type: 'input_audio'; input_audio: { data: string; format: 'wav' } }
+    >;
+type ChatMsg = { role: 'system' | 'user' | 'assistant'; content: ChatContent };
 
 function contextPayload(req: ParseRequest): Record<string, unknown> {
   return {
@@ -245,7 +280,12 @@ function contextPayload(req: ParseRequest): Record<string, unknown> {
   };
 }
 
-async function chat(messages: ChatMsg[], apiKey: string, signal: AbortSignal): Promise<string> {
+async function chat(
+  messages: ChatMsg[],
+  apiKey: string,
+  signal: AbortSignal,
+  audio: boolean,
+): Promise<string> {
   const res = await fetch(OPENROUTER_URL, {
     method: 'POST',
     headers: {
@@ -253,8 +293,8 @@ async function chat(messages: ChatMsg[], apiKey: string, signal: AbortSignal): P
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model: MODEL,
-      models: FALLBACK_MODELS,
+      model: audio ? AUDIO_MODELS[0] : MODEL,
+      models: audio ? AUDIO_MODELS : FALLBACK_MODELS,
       temperature: 0.85, // the ack is a performance; a little spread makes it live
       max_tokens: 900,
       response_format: RESPONSE_FORMAT,
@@ -289,18 +329,32 @@ function extractJson(content: string): unknown {
 export async function parseWithLlm(req: ParseRequest): Promise<ParsedCommand | null> {
   const apiKey = process.env.OPENROUTER_API_KEY; // request-time, not module load
   if (!apiKey) return null;
+  const audio = req.audio ?? null;
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), PARSE_TIMEOUT_MS);
+  const timer = setTimeout(() => ctrl.abort(), audio ? PARSE_AUDIO_TIMEOUT_MS : PARSE_TIMEOUT_MS);
   try {
+    const context = JSON.stringify(contextPayload(req));
     const messages: ChatMsg[] = [
-      { role: 'system', content: SYSTEM_PROMPT },
-      { role: 'user', content: JSON.stringify(contextPayload(req)) },
+      { role: 'system', content: audio ? SYSTEM_PROMPT + AUDIO_PROMPT : SYSTEM_PROMPT },
+      {
+        role: 'user',
+        content: audio
+          ? [
+              { type: 'text', text: context },
+              { type: 'input_audio', input_audio: { data: audio.data, format: audio.format } },
+            ]
+          : context,
+      },
     ];
     for (let attempt = 0; attempt < 2; attempt++) {
       let content: string;
       try {
-        content = await chat(messages, apiKey, ctrl.signal);
-      } catch {
+        content = await chat(messages, apiKey, ctrl.signal, audio !== null);
+      } catch (e) {
+        // The endpoint fail-softs to the local parser, which is invisible from
+        // the outside — without this line an upstream that rejects every
+        // request looks exactly like a model that is merely unhelpful.
+        console.warn(`[parse] llm failed${audio ? ' (audio)' : ''}: ${String(e)}`);
         return null; // network/timeout/upstream — straight to local
       }
       const raw = extractJson(content);

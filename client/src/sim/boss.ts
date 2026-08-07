@@ -26,6 +26,7 @@ import type { Entity, SimState, Vec } from '../../../shared/types';
 import { TILE } from '../../../shared/types';
 import {
   BOSS_R,
+  SNEAK_AGGRO_FACTOR,
   CONTACT_RANGE,
   ENEMY_R,
   KNOCKBACK_PX,
@@ -33,6 +34,7 @@ import {
   aiOf,
   emit,
   isLiveHostile,
+  movingQuietly,
   roll,
   wakeMachine,
 } from './internal';
@@ -92,6 +94,22 @@ const VOLLEY_FUSE_STEP = 5;
 const WIND_TICKS = 24;
 /** Ticks the firing pose is held after a volley, so the throw is a motion. */
 const FIRE_TICKS = 10;
+
+/**
+ * How close the robot gets before the shredder stands up, px.
+ *
+ * It used to be woken by exactly one thing: a bolt landing in it. A boss that
+ * ignores you until you shoot it is not asleep, it is waiting for permission,
+ * and the operator who walks their robot into the middle of the arena and gets
+ * nothing has been told the fight is optional.
+ *
+ * 150 against the ~192px the elevator sits from it: the doors open on a still
+ * room and the first steps in are free, which is the beat the arena is built
+ * around, and then it notices — before contact range, before the first mortar,
+ * with the whole approach still ahead of you. Bigger than a printer's
+ * AGGRO_RANGE 120 on purpose. This is the thing in the room, not a thing in it.
+ */
+const BOSS_NOTICE_PX = 150;
 
 /**
  * Impact scatter, px. Without it a stationary robot is hit dead centre every
@@ -211,7 +229,28 @@ export function stepBoss(state: SimState, scratch: RobotScratch): void {
   // this loop appends must not also take a turn on the tick it appeared.
   for (let i = 0, n = state.entities.length; i < n; i++) {
     const e = state.entities[i];
-    if (e.kind !== 'fusedShredder' || !isLiveHostile(e)) continue;
+    if (e.kind !== 'fusedShredder' || e.dead) continue;
+    // IT WAKES ON APPROACH. Before this, exactly one thing on the floor could
+    // stand the shredder up: a bolt landing in it. Walk into the middle of the
+    // arena without shooting and the boss watched — which reads as a broken
+    // fight, not a patient one, and makes the exam something the player has to
+    // opt into. Sneaking still buys the shorter range, so "sneak up on it" is
+    // a real sentence here too.
+    if (e.state === 'dormant') {
+      if (!r.alive) continue;
+      const notice = movingQuietly(state, scratch)
+        ? BOSS_NOTICE_PX * SNEAK_AGGRO_FACTOR
+        : BOSS_NOTICE_PX;
+      // No notice cone and no line-of-sight test, unlike a printer: this thing
+      // fills the room it is in, it never loses aggro once it has you, and a
+      // boss that can be crept past behind a stanchion is a boss the arena
+      // does not actually contain.
+      if (dist(e.pos, r.pos) > notice) continue;
+      wakeMachine(e);
+      // The room changes character here — the director hangs the music on it.
+      emit(state, 'boss_wake', e.id);
+    }
+    if (!isLiveHostile(e)) continue;
     const ai = aiOf(e);
 
     // It never loses aggro. A boss that forgets you the moment you step behind

@@ -12,8 +12,12 @@
         padding: 0;
         width: 100%;
         height: 100%;
+        /* dvh follows the mobile URL bar; % is the fallback for old browsers */
+        height: 100dvh;
         background: #050505;
         overflow: hidden;
+        /* a held finger is push-to-talk, never a scroll or a pull-to-refresh */
+        overscroll-behavior: none;
         -webkit-user-select: none;
         -moz-user-select: none;
         user-select: none;
@@ -27,8 +31,11 @@
         display: flex;
         align-items: center;
         justify-content: center;
+        /* the monitor owns every touch on it — the browser gets none */
+        touch-action: none;
       }
       canvas {
+        display: block;
         image-rendering: pixelated;
         outline: none;
       }

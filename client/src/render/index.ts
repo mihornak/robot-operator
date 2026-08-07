@@ -34,11 +34,30 @@ export function createRenderApp(art: ArtAtlas): RenderApp {
   let inited = false;
   let lastNow = -1;
 
+  /**
+   * Integer scale is the pixel-pure ideal, and on a 27" monitor it costs
+   * nothing. On a 13" laptop (2.7× available) or a phone (1.4×) the next
+   * integer down throws away a third of the screen, and the game is a monitor
+   * you lean into — a postage stamp in a black field is the wrong object. So:
+   * take the integer only when it wastes little, otherwise fill the screen and
+   * accept uneven pixel widths. The CRT curvature, scanlines and grain were
+   * never a clean pixel grid anyway; empty room around the monitor is the more
+   * visible defect.
+   */
+  function fitScale(w: number, h: number): number {
+    const raw = Math.min(w / VIEW_W, h / VIEW_H);
+    const int = Math.floor(raw);
+    return int >= 1 && int / raw >= 0.86 ? int : raw;
+  }
+
   function layout(): void {
-    const w = window.innerWidth;
-    const h = window.innerHeight;
+    // visualViewport is the truth on mobile: innerHeight lies while the URL
+    // bar animates and after the on-screen keyboard opens.
+    const vv = window.visualViewport;
+    const w = Math.max(1, Math.round(vv?.width ?? window.innerWidth));
+    const h = Math.max(1, Math.round(vv?.height ?? window.innerHeight));
     app.renderer.resize(w, h);
-    const s = Math.max(1, Math.floor(Math.min(w / VIEW_W, h / VIEW_H)));
+    const s = fitScale(w, h);
     frame.scale.set(s);
     frame.position.set(
       Math.round((w - VIEW_W * s) / 2),
@@ -61,7 +80,7 @@ export function createRenderApp(art: ArtAtlas): RenderApp {
       preference: 'webgl',
       antialias: false,
       background: '#08090b',
-      resizeTo: window,
+      // no resizeTo: layout() owns the size, and it measures visualViewport
       resolution: 1,
       autoStart: false, // render() drives frames — enables dropped-frame flicker
     });
@@ -96,7 +115,20 @@ export function createRenderApp(art: ArtAtlas): RenderApp {
     app.stage.addChild(letterbox, frame);
 
     layout();
-    window.addEventListener('resize', layout);
+    // Coalesce to one relayout per frame: a phone fires resize + visualViewport
+    // resize + orientationchange in a burst while the URL bar slides away.
+    let pending = 0;
+    const relayout = (): void => {
+      if (pending) return;
+      pending = requestAnimationFrame(() => {
+        pending = 0;
+        layout();
+      });
+    };
+    window.addEventListener('resize', relayout);
+    window.addEventListener('orientationchange', relayout);
+    window.visualViewport?.addEventListener('resize', relayout);
+    window.visualViewport?.addEventListener('scroll', relayout);
     host.appendChild(app.canvas);
     if (import.meta.env.DEV) (globalThis as { __app?: unknown }).__app = app;
     inited = true;

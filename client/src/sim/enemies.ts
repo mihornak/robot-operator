@@ -23,6 +23,7 @@ import {
   SPIT_TELEGRAPH_TICKS,
   aiOf,
   emit,
+  movingQuietly,
   isLiveHostile,
   kindWeight,
   radiusOf,
@@ -153,11 +154,7 @@ export function stepEnemies(state: SimState, scratch: RobotScratch): void {
 
     // Sneaking (careful order, + a ~6s linger after it completes) is QUIET —
     // half notice range. Payoff of "sneak to X": don't wake the machine.
-    const quiet =
-      scratch.sneakLingerTicks > 0 ||
-      r.standing.careful || // a standing "move carefully" is quiet all the time
-      (r.order !== null && (r.order.kind === 'goto' || r.order.kind === 'pickup') && r.order.careful === true);
-    const notice = quiet ? AGGRO_RANGE * SNEAK_AGGRO_FACTOR : AGGRO_RANGE;
+    const notice = movingQuietly(state, scratch) ? AGGRO_RANGE * SNEAK_AGGRO_FACTOR : AGGRO_RANGE;
 
     // LINE OF SIGHT gates everything. Distance-only aggro meant the floor-3
     // printer woke the instant the robot stepped off the lift two rooms away,

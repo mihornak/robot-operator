@@ -160,8 +160,22 @@ const parseEntitySchema = z.object({
 });
 
 /** Incoming /api/parse body. Defaults keep hand-rolled curl requests working. */
+/**
+ * A recorded press from a browser with no speech recognition of its own.
+ * ~1.4 MB of base64 is 12s of 16 kHz mono WAV — the client's own cap, restated
+ * here because a request body is never trusted for its size.
+ */
+export const audioClipSchema = z.object({
+  data: z.string().min(64).max(1_500_000),
+  format: z.literal('wav'),
+  ms: z.number().int().min(0).max(20000).default(0),
+});
+
 export const parseRequestSchema = z.object({
-  utterance: z.string().min(1),
+  // Empty when `audio` carries the utterance — the refine below enforces that
+  // one of the two is actually present.
+  utterance: z.string().default(''),
+  audio: audioClipSchema.nullish(),
   alternatives: z.array(z.string()).max(5).default([]),
   tier: z.union([z.literal(0), z.literal(1), z.literal(2)]).default(1),
   floor: z.number().int().default(1),
@@ -182,6 +196,8 @@ export const parseRequestSchema = z.object({
   // Defaults FALSE: an old client that does not send it gets the terse,
   // combat-safe behaviour rather than a robot chatting through a firefight.
   calm: z.boolean().default(false),
+}).refine((r) => r.utterance.length > 0 || !!r.audio, {
+  message: 'utterance or audio required',
 });
 
 /** Incoming /api/say body — the unprompted-speech channel. */
@@ -263,6 +279,9 @@ export const llmOutputSchema = z.object({
   plan: z.array(llmPlanStepSchema).max(MAX_PLAN_STEPS).nullish(),
   directives: z.array(z.enum(DIRECTIVE_KINDS)).max(4).nullish(),
   ack_line: z.string(),
+  // Only asked for on the audio path: the model's own transcript, so the
+  // dialogue log still has the player's side. Never displayed (rule 6).
+  heard: z.string().nullish(),
   insult: z.boolean().nullish(),
   // The conversation channel. An array rather than a paragraph so the toddler
   // cap can be enforced per sentence and the director can pace them.
@@ -511,6 +530,12 @@ export function toParsedCommand(raw: unknown, req: ParseRequest): ParsedCommand 
   if (!cmd) return null;
   cmd.source = 'llm';
   if (v.insult) cmd.insult = true;
+  // The transcript comes back only when the client sent audio and so has none
+  // of its own. Capped: this feeds a rolling log, not a document.
+  if (req.audio && typeof v.heard === 'string') {
+    const heard = v.heard.trim().slice(0, 200);
+    if (heard) cmd.heard = heard;
+  }
 
   // TALK. Hangs off `chatter` and nothing else: a rambling answer attached to
   // a goto would have the robot deliver a monologue while walking away from

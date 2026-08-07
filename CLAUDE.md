@@ -34,7 +34,10 @@ Read `GAME_SPEC.md` (systems) and `FIRST_MINUTES.md` (feel; wins on feel).
 - `client/src/render/` — PixiJS v8 only: stage, tilemap, sprites, CRT stack, OSD.
 - `client/src/art/` — code-drawn pixel textures (canvas → pixi textures) per `shared/artManifest.ts`, plus `sprites/` (build-time 3D bakes, see rule 10).
 - `client/src/audio/` — WebAudio: sfx, voice playback (radio-processed), hum. iOS resume handling.
-- `client/src/voice/` — CommandSource impls: WebSpeech (push-to-talk), Teletype.
+- `client/src/voice/` — CommandSource impls: WebSpeech (push-to-talk), LlmSpeech
+  (records the press to 16 kHz WAV and lets the parse model listen — the ears
+  for Safari/iOS, which ship no SpeechRecognition), Teletype. Exactly one mic
+  source is chosen per browser; `?stt=llm` forces the recorded path.
 - `client/src/net/` — `/api/parse`, `/api/tts`, `/api/log` client.
 - `client/src/game/` — director: beats, script, ceremonies, death card. The only place that wires subsystems.
 - `server/` — Hono: `/api/parse` (OpenRouter), `/api/tts` (ElevenLabs proxy + disk cache), `/api/log`, serves `client/dist` in prod.

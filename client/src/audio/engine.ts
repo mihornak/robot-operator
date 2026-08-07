@@ -74,10 +74,18 @@ export class WebAudioEngine implements AudioEngine {
   private voiceIn!: GainNode; // radio chain entry
   private comp!: DynamicsCompressorNode;
   private crackleGate!: GainNode; // static bed, opens while voice plays
+  private musicLevel!: GainNode; // the bed's own fade in/out
+  private musicDuck!: GainNode; // voice ducking target on the music side
 
   private sfx = new Map<SfxName, AudioBuffer | 'loading' | 'missing'>();
   private voiceSrc: AudioBufferSourceNode | null = null;
   private voiceDone: (() => void) | null = null;
+  private musicSrc: AudioBufferSourceNode | null = null;
+  /** Decoded beds by url. A run is replayable and the boss is met once per
+   *  run — refetching a megabyte on every retry is a stall on the one frame
+   *  that must not have one. 'missing' is remembered too, so a build shipped
+   *  without the track asks the network exactly once. */
+  private music = new Map<string, AudioBuffer | 'missing'>();
 
   private lastPlayed = new Map<string, number>(); // SFX_MIN_GAP bookkeeping, ms on the audio clock
   private starts: { t: number; vol: number }[] = []; // CAP_WINDOW_MS ring of recent starts
@@ -172,6 +180,85 @@ export class WebAudioEngine implements AudioEngine {
     }
     this.duck(false);
     done?.();
+  }
+
+  /**
+   * Looping music bed. Fail-soft by contract: a 404, a decode failure or a
+   * suspended context all resolve FALSE and play nothing. The boss fight is
+   * carried by the roar, the mortars and the adds — the music is the layer on
+   * top of that, never the thing holding it up.
+   */
+  async playMusic(url: string, opts?: { volume?: number; fadeMs?: number }): Promise<boolean> {
+    const ctx = this.ctx;
+    if (!ctx) return false;
+    const buf = await this.loadMusic(url);
+    if (buf === 'missing') return false;
+    this.stopMusic(0);
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.loop = true;
+    src.connect(this.musicLevel);
+    this.musicSrc = src;
+    const vol = opts?.volume ?? 0.5;
+    const fade = (opts?.fadeMs ?? 900) / 1000;
+    const t = ctx.currentTime;
+    // Ramp from wherever it actually is: a stop still fading out when the next
+    // start lands must not jump to zero and click.
+    this.musicLevel.gain.cancelScheduledValues(t);
+    this.musicLevel.gain.setValueAtTime(this.musicLevel.gain.value, t);
+    this.musicLevel.gain.linearRampToValueAtTime(vol, t + Math.max(0.01, fade));
+    src.start();
+    return true;
+  }
+
+  async prefetchMusic(url: string): Promise<void> {
+    // No context yet (the player has not pressed anything, or the tab was
+    // hidden through boot and autoplay policy blocked init): decoding is
+    // impossible, but the DOWNLOAD is not. Warm the HTTP cache so the later
+    // decode is local. Without this the prefetch is a silent no-op forever —
+    // it only ever runs once, and it would have run at the wrong moment.
+    if (!this.ctx) {
+      await fetch(url).catch(() => {});
+      return;
+    }
+    await this.loadMusic(url);
+  }
+
+  /** Fetch + decode once, remembering the answer — including 'missing', so a
+   *  build without the track asks the network exactly once. */
+  private async loadMusic(url: string): Promise<AudioBuffer | 'missing'> {
+    const ctx = this.ctx;
+    if (!ctx) return 'missing';
+    const cached = this.music.get(url);
+    if (cached !== undefined) return cached;
+    let buf: AudioBuffer | 'missing';
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`music ${res.status}`);
+      buf = await ctx.decodeAudioData(await res.arrayBuffer());
+    } catch {
+      buf = 'missing';
+    }
+    this.music.set(url, buf);
+    return buf;
+  }
+
+  stopMusic(fadeMs = 700): void {
+    const ctx = this.ctx;
+    const src = this.musicSrc;
+    if (!ctx || !src) return;
+    this.musicSrc = null;
+    const t = ctx.currentTime;
+    const fade = Math.max(0, fadeMs) / 1000;
+    this.musicLevel.gain.cancelScheduledValues(t);
+    this.musicLevel.gain.setValueAtTime(this.musicLevel.gain.value, t);
+    this.musicLevel.gain.linearRampToValueAtTime(0, t + Math.max(0.01, fade));
+    // Stop AFTER the ramp, not on it: a source stopped mid-fade is a click.
+    try {
+      src.stop(t + fade + 0.05);
+    } catch {
+      /* already stopped */
+    }
   }
 
   setHum(level: number): void {
@@ -285,6 +372,14 @@ export class WebAudioEngine implements AudioEngine {
     this.voiceBus = ctx.createGain();
     this.voiceBus.gain.value = 1.1;
     this.voiceBus.connect(this.master);
+
+    // music bed → its own fade → voice duck → master. Deliberately NOT through
+    // the sfx limiter: a sustained bed sitting in the limiter's detector would
+    // pump the whole firefight in time with the drums.
+    this.musicLevel = ctx.createGain();
+    this.musicLevel.gain.value = 0;
+    this.musicDuck = ctx.createGain();
+    this.musicLevel.connect(this.musicDuck).connect(this.master);
 
     // ambient: 50Hz mains hum + 100Hz harmonic + brown-noise room tone
     this.ambientLevel = ctx.createGain();
@@ -413,6 +508,9 @@ export class WebAudioEngine implements AudioEngine {
     // Same fast-down/slow-up shape as the ambient duck: the firefight gets out of
     // the way of the line quickly, then swells back without an audible edge.
     this.sfxDuck.gain.setTargetAtTime(on ? SFX_DUCK_LEVEL : 1, t, on ? 0.05 : 0.25);
+    // The robot talking is the whole game; a bed loud enough to sit over it
+    // would be a bed that costs the player the thing they came for.
+    this.musicDuck.gain.setTargetAtTime(on ? DUCK_LEVEL : 1, t, on ? 0.05 : 0.25);
     this.crackleGate.gain.setTargetAtTime(on ? 1 : 0, t, on ? 0.02 : 0.08);
   }
 }

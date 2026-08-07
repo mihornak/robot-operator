@@ -11,6 +11,12 @@ import type {
 } from '@shared/types';
 
 const PARSE_TIMEOUT_MS = 2500; // ack contract: ≤1.5s target, hard stop at 2.5
+/**
+ * A recorded press is a few hundred KB going UP a phone's uplink before the
+ * model has heard a word, and the server's own audio budget is 6.5s. Holding
+ * this to 2.5 would abort every audio parse that was going to succeed.
+ */
+const PARSE_AUDIO_TIMEOUT_MS = 9000;
 const TTS_TIMEOUT_MS = 3500;
 /** Unprompted speech is ambient — it may never make the game wait. */
 const SAY_TIMEOUT_MS = 3000;
@@ -29,7 +35,7 @@ async function withTimeout<T>(ms: number, fn: (signal: AbortSignal) => Promise<T
 
 /** Throws on any failure — caller falls back to the local parser. */
 export async function apiParse(req: ParseRequest): Promise<ParsedCommand> {
-  return withTimeout(PARSE_TIMEOUT_MS, async (signal) => {
+  return withTimeout(req.audio ? PARSE_AUDIO_TIMEOUT_MS : PARSE_TIMEOUT_MS, async (signal) => {
     const res = await fetch('./api/parse', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

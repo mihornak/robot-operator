@@ -32,13 +32,22 @@ import * as sim from '../sim/index';
 import { initArt } from '../art/index';
 import { createRenderApp } from '../render/index';
 import { blastGain, createAudioEngine } from '../audio/engine';
+import type { MicCommandSource } from '../voice/webspeech';
 import { SILENT_RMS, WebSpeechSource } from '../voice/webspeech';
+import { LlmSpeechSource } from '../voice/llmspeech';
 import { TeletypeSource } from '../voice/teletype';
 import { parseLocal } from '../voice/localParser';
 import { apiParse, apiSay, logEvent } from '../net/api';
 import type { SpeechPriority } from './speech';
 import { SpeechQueue } from './speech';
 import { WishlistGate } from './wishlist';
+
+/**
+ * The boss bed, bundled like every other asset (rule 1 — relative path, no CDN).
+ * If the file is not in the build, playMusic resolves false and the arena is
+ * simply quieter: no console noise, no missing-asset branch anywhere else.
+ */
+const BOSS_MUSIC_URL = './assets/music/boss.mp3';
 
 const uiRng = makeRng(0xc0ffee); // presentation-only randomness
 
@@ -79,7 +88,19 @@ const MIC_HELP: Record<MicHelp['fault'], MicHelp> = {
     title: 'This browser has no speech recognition.',
     steps: [
       'Chrome, Edge or Arc on desktop will work.',
-      'Safari and Firefox will not.',
+      'Safari and Firefox need the voice server.',
+      'Or play by typing — press any letter key.',
+    ],
+  },
+  // Browsers with no recognition of their own record the press and send it to
+  // the parse model instead (voice/llmspeech.ts). With no model key upstream
+  // that path has nowhere to go, and the mic is not the thing that is broken.
+  noServer: {
+    fault: 'noServer',
+    title: 'This browser cannot transcribe, and voice is offline.',
+    steps: [
+      'The mic is fine — nothing is listening at the other end.',
+      'Chrome, Edge or Arc listen locally, with no server.',
       'Or play by typing — press any letter key.',
     ],
   },
@@ -155,7 +176,7 @@ class Director {
   private render!: RenderApp;
   private audio = createAudioEngine();
   private speech!: SpeechQueue;
-  private speechSource: CommandSource | null = null;
+  private speechSource: MicCommandSource | null = null;
   private teletype = new TeletypeSource();
   /** Owns the screen and the keyboard between a finished run and the next one. */
   private wishlist = new WishlistGate();
@@ -229,6 +250,8 @@ class Director {
   private idleLadderStep: number = WAIT_LADDER.length;
   private ladderStart = 0;
   private lastSparkAt = 0;
+  /** pointerId of the finger currently holding PTT; null when none is down */
+  private touchPtt: number | null = null;
 
   constructor(private host: HTMLElement) {}
 
@@ -242,8 +265,16 @@ class Director {
       this.lastIdleAt = performance.now();
     });
 
+    // EXACTLY ONE mic source, chosen per browser. Web Speech wherever it
+    // exists: recognition on the device is free, private and instant. Where it
+    // does not — Safari, and therefore every browser on iOS — we record the
+    // press and let the parse model listen to it instead (voice/llmspeech.ts).
+    // ?stt=llm forces the second path on a machine that has the first.
+    const forceLlm = new URLSearchParams(location.search).get('stt') === 'llm';
     const speech = new WebSpeechSource();
-    if (speech.available) this.speechSource = speech;
+    const mic: MicCommandSource =
+      !forceLlm && speech.available ? speech : new LlmSpeechSource();
+    if (mic.available) this.speechSource = mic;
 
     this.teletype.onUtterance((u) => {
       // With a mic available the teletype is transient; keep it live otherwise.
@@ -257,6 +288,7 @@ class Director {
 
     window.addEventListener('keydown', (e) => this.onKeyDown(e));
     window.addEventListener('keyup', (e) => this.onKeyUp(e));
+    this.bindTouch();
 
     // DEV debug overlay: live STT transcript + errors + parse state (never in prod builds).
     if (import.meta.env.DEV) {
@@ -266,6 +298,8 @@ class Director {
         'font:12px/1.5 monospace;color:#7dff9a;background:rgba(0,0,0,0.72);border:1px solid #2c4;' +
         'pointer-events:none;white-space:pre-wrap;';
       document.body.appendChild(dbg);
+      // liveTranscript only exists on the Web Speech path — the recorded path
+      // has no words until the server answers.
       const src = this.speechSource instanceof WebSpeechSource ? this.speechSource : null;
       setInterval(() => {
         dbg.textContent =
@@ -316,6 +350,7 @@ class Director {
         for (const c of this.state.robot.chips) this.modules.push(c);
         this.ui.glyphs = [...this.modules];
         sim.loadFloor(this.state, f - 1);
+        if (f === FLOORS_IN_RUN) void this.audio.prefetchMusic(BOSS_MUSIC_URL);
         if (!this.state.robot.hasMemory) this.state.robot.name = null;
         this.ui.phase = 'play';
         this.ui.stickyNote = false;
@@ -435,6 +470,60 @@ class Director {
     }
   }
 
+  /**
+   * A finger is the space bar. Hold anywhere on the monitor to transmit, tap to
+   * power on, tap to loop — the same phase machine, the same PTT, no second
+   * code path to keep in sync. Bound to the canvas host, not the window, so the
+   * wishlist gate (DOM, sitting above the monitor) keeps its own taps.
+   */
+  private bindTouch(): void {
+    this.host.addEventListener('pointerdown', (e: PointerEvent) => {
+      if (e.pointerType === 'mouse') return; // a mouse has a keyboard beside it
+      e.preventDefault();
+      this.onTouchDown(e);
+      // Capture so a finger that slides off the canvas still delivers its up.
+      // AFTER the handler and inside a try: capture throws if the pointer is
+      // already gone (a tap fast enough to release first), and a failed nicety
+      // must never swallow the order.
+      try {
+        (e.target as Element | null)?.setPointerCapture?.(e.pointerId);
+      } catch {
+        // no capture — the window-level pointerup below is the safety net
+      }
+    });
+    const up = (e: PointerEvent): void => {
+      if (this.touchPtt !== e.pointerId) return;
+      this.touchPtt = null;
+      if (this.ui.pttHeld) void this.endPtt();
+    };
+    this.host.addEventListener('pointerup', up);
+    this.host.addEventListener('pointercancel', up);
+    // Belt and braces: a lost capture (context menu, app switch) must not leave
+    // the transmission open forever.
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+  }
+
+  private onTouchDown(e: PointerEvent): void {
+    if (this.wishlist.open) return;
+    const phase = this.ui.phase;
+
+    if (phase === 'off') {
+      void this.boot();
+      return;
+    }
+    if (phase === 'boot' || phase === 'cliffhanger') return;
+    if (phase === 'death' || phase === 'title') {
+      this.gateThenRestart();
+      return;
+    }
+    // A typed command in flight owns the input; the finger does not interrupt it.
+    if (this.teletype.active && this.teletype.value.length > 0) return;
+    if (this.touchPtt !== null) return; // a second finger is not a second mic
+    this.touchPtt = e.pointerId;
+    this.startPtt();
+  }
+
   /** A run does not loop until the player has left an address (game/wishlist.ts). */
   private gateThenRestart(): void {
     if (this.wishlist.satisfied) {
@@ -480,7 +569,9 @@ class Director {
     }
     this.ui.micState = 'thinking';
     const u = await this.speechSource.stop();
-    if (!u || !u.text.trim()) {
+    // A recorded press carries no text at all — the words are inside u.audio
+    // and only the parse model can read them. Empty means empty either way.
+    if (!u || (!u.text.trim() && !u.audio)) {
       this.ui.micState = 'idle';
       this.onEmptyPress();
       return;
@@ -497,8 +588,7 @@ class Director {
    */
   private onEmptyPress(): void {
     this.emptyPresses++;
-    const src = this.speechSource instanceof WebSpeechSource ? this.speechSource : null;
-    const d = src?.diagnose();
+    const d = this.speechSource?.diagnose();
     const heardAudio = (d?.peakRms ?? 0) >= SILENT_RMS;
 
     if (!this.woken) {
@@ -568,7 +658,7 @@ class Director {
       this.ui.stickyNote = false;
     }, 500);
     // Mic permission prompt now, over the boot flash — not on first PTT.
-    if (this.speechSource instanceof WebSpeechSource) void this.speechSource.warmup();
+    void this.speechSource?.warmup();
     setTimeout(() => {
       this.ui.phase = 'play';
       this.setOsd();
@@ -688,7 +778,11 @@ class Director {
     const t0 = performance.now();
     const epoch = this.runEpoch;
     const seq = ++this.parseSeq;
-    this.remember(`VOICE: ${u.text}`);
+    // A recorded press has no words yet — they come back as `heard`. Hold the
+    // slot with a marker so the log keeps its VOICE/ROBOT order, then fill it
+    // in (or drop it) the moment the parse lands.
+    const pending = `VOICE: …#${seq}`;
+    this.remember(u.audio ? pending : `VOICE: ${u.text}`);
     const req = this.parseRequest(u);
 
     // LOCAL FIRST, synchronously. The keyword matcher is a table lookup — it
@@ -706,7 +800,11 @@ class Director {
       recent: req.recent,
       calm: req.calm,
     });
-    const fast = this.fastEligible(local, u.text.trim().split(/\s+/).filter(Boolean).length);
+    // The local matcher reads TEXT. A recorded press has none, so there is
+    // nothing to match and nothing to answer early with — the model is the
+    // only reader on that path.
+    const fast =
+      !u.audio && this.fastEligible(local, u.text.trim().split(/\s+/).filter(Boolean).length);
     if (fast) {
       this.apply(local);
       this.reaction(t0, 'fast', local.intent);
@@ -725,6 +823,25 @@ class Director {
     } catch {
       remote = null; // network/timeout — the local reading is all we have
     }
+    // Fill the held slot before ANY early return below: a marker left in the
+    // dialogue log would be sent to the model as if the player had said it.
+    if (u.audio) {
+      const i = this.dialogue.lastIndexOf(pending);
+      if (i >= 0) {
+        if (remote?.heard) this.dialogue[i] = `VOICE: ${remote.heard}`;
+        else this.dialogue.splice(i, 1);
+      }
+    }
+    // A `local` answer to a RECORDED press means the server never ran the
+    // model (no key upstream): it parsed the empty string we sent alongside
+    // the audio. That is not a reading of what the player said, it is the
+    // absence of one — and the mic is not what is broken, so say which.
+    if (u.audio && remote?.source === 'local') {
+      remote = null;
+      this.showMicHelp('noServer');
+      this.teletype.setActive(true);
+      this.ui.teletypeActive = true;
+    }
     if (!fast) {
       this.slowPending = Math.max(0, this.slowPending - 1);
       this.parsing = this.slowPending > 0;
@@ -739,7 +856,15 @@ class Director {
     }
 
     if (!fast) {
-      const cmd = remote ?? local;
+      // On the recorded path `local` was parsed from an empty string, so it is
+      // a "mumbly" clarify — the one thing the robot must never say when the
+      // player DID speak and it was the server that failed. Say the true thing
+      // instead, in its own voice.
+      const cmd =
+        remote ??
+        (u.audio
+          ? ({ intent: 'clarify', ack_line: 'ROBOT EARS WENT AWAY. AGAIN?' } as ParsedCommand)
+          : local);
       this.apply(cmd);
       this.reaction(t0, remote ? 'llm' : 'local_fallback', cmd.intent);
       return;
@@ -1038,10 +1163,11 @@ class Director {
    *  at the same room — a fast reading resolved against different entities than
    *  the model saw would make reconcile() lie. */
   private parseRequest(u: Utterance): ParseRequest {
-    const src = this.speechSource instanceof WebSpeechSource ? this.speechSource : null;
+    const src = this.speechSource;
     const r = this.state.robot;
     return {
       utterance: u.text,
+      audio: u.audio ?? null,
       alternatives: u.source === 'speech' ? (src?.alternatives ?? []) : [],
       tier: r.tier,
       floor: this.state.floorIndex + 1,
@@ -1602,6 +1728,29 @@ class Director {
           this.quietFor(6000);
           break;
         }
+        // THE ARENA'S ONE IRREVERSIBLE BEAT. Everything before it is a still
+        // room; everything after is the fight. It gets the roar, the shake and
+        // the music, because a boss that stands up quietly has not started
+        // anything — see BOSS_NOTICE_PX in sim/boss.ts.
+        case 'boss_wake':
+          this.audio.playSfx('boss_roar');
+          this.render.fx.shake(5, 500);
+          this.audio.setHum(0.18); // the room tone gets out of the way
+          void this.audio.playMusic(BOSS_MUSIC_URL, { volume: 0.45, fadeMs: 1200 });
+          this.speech.sayBank('enemy_spot', 'bark');
+          logEvent('boss_wake');
+          break;
+        // Each threshold is an escalation the player has to HEAR — the roar
+        // existed in the synth bank with no caller, so crossing a phase was
+        // silent and the fight had no shape in the ears at all.
+        case 'boss_phase': {
+          const phase = Number(ev.data?.phase ?? 0);
+          if (phase > 1) {
+            this.audio.playSfx('boss_roar');
+            this.render.fx.shake(4, 400);
+          }
+          break;
+        }
         case 'shot_fired':
           this.audio.playSfx('shoot');
           break;
@@ -1626,6 +1775,10 @@ class Director {
             // it powers the lift — without this the ending is unreachable and
             // the player is sealed in a room with a corpse.
             sim.powerElevatorB(this.state);
+            // The bed goes out with the boss. Slower than the blast on
+            // purpose: the room is allowed to keep ringing for a moment.
+            this.audio.stopMusic(2200);
+            this.audio.setHum(0.5);
           } else {
             this.audio.playSfx('enemy_die');
             // Nothing used to shake when anything died, which is most of why
@@ -1832,6 +1985,10 @@ class Director {
     sim.setOrder(this.state, null); // orders don't survive the elevator ride
     this.setOsd();
     const floor = this.state.floorIndex + 1;
+    // Pull the bed down as the doors open, not when the boss stands up: it is
+    // over a megabyte, and a fetch that starts on the roar is music that
+    // arrives after the moment it exists to score.
+    if (floor === FLOORS_IN_RUN) void this.audio.prefetchMusic(BOSS_MUSIC_URL);
     setTimeout(() => {
       if (this.state.floorIndex + 1 !== floor || !this.simRunning()) return;
       if (floor === 2) {
@@ -1858,6 +2015,10 @@ class Director {
     this.ui.upgrade = null; // a reveal does not outlive the robot holding it
     this.speech.clear();
     this.audio.playSfx('powerdown');
+    // Dying in the arena takes the bed with it — the death card plays over a
+    // dead feed, and a boss loop still going under it would say the fight is
+    // somehow continuing without the robot.
+    this.audio.stopMusic(600);
     this.render.fx.glitchFrame();
     this.ui.degrade = 1;
     const lastWords = pick(LINE_GROUPS.deathWords);
@@ -1889,6 +2050,7 @@ class Director {
     this.clearThenChain();
     this.clearQuestion();
     this.speech.clear();
+    this.audio.stopMusic(0); // a new run starts in a quiet building
     this.render.fx.deadCam(false);
     this.state = sim.initialState((Date.now() % 2147483647) | 0);
     // The pile beat is a one-time opening, not a death penalty: a restart is
@@ -1965,8 +2127,7 @@ class Director {
 
     // Live input level — real RMS from the meter, so the VU and the help card's
     // bar are evidence, not decoration.
-    const src = this.speechSource instanceof WebSpeechSource ? this.speechSource : null;
-    this.ui.micLevel = src?.level ?? 0;
+    this.ui.micLevel = this.speechSource?.level ?? 0;
     if (this.ui.micHelp && now > this.micHelpUntil) this.dismissMicHelp();
 
     const r = this.state.robot;

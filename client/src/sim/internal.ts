@@ -470,6 +470,25 @@ export const HOSTILE_KINDS: ReadonlySet<EntityKind> = new Set(['fusedPrinter', '
 export const isLiveHostile = (e: Entity): boolean =>
   HOSTILE_KINDS.has(e.kind) && !e.dead && e.state !== 'dormant';
 
+/**
+ * Is the robot moving QUIETLY this tick? Halves every machine's notice range
+ * (SNEAK_AGGRO_FACTOR) and is the entire payoff of "sneak to X".
+ *
+ * Shared rather than re-derived per enemy file: the printers and the boss have
+ * to agree on what sneaking means, or "sneak up on the shredder" is a sentence
+ * the game accepts and then ignores.
+ */
+export function movingQuietly(state: SimState, scratch: RobotScratch): boolean {
+  const r = state.robot;
+  return (
+    scratch.sneakLingerTicks > 0 || // ~6s of quiet after a careful order lands
+    r.standing.careful || // a standing "move carefully" is quiet all the time
+    (r.order !== null &&
+      (r.order.kind === 'goto' || r.order.kind === 'pickup') &&
+      r.order.careful === true)
+  );
+}
+
 /** Stand a dormant machine up. Idempotent; also sets aggro, because a machine
  *  woken by a script or a boss phase is awake AND already looking for you. */
 export function wakeMachine(e: Entity): void {

@@ -10,6 +10,29 @@ export const AMBER_DIM = 0xb87f00;
 export const VT323 = ['VT323', 'monospace'];
 export const CAVEAT = ['Caveat', 'cursive'];
 
+/**
+ * Is the player's primary input a finger? Decides whether the prompts say
+ * [SPACE] or TAP — telling a phone to press space is telling it nothing.
+ * Seeded from the media query, then latched true the first time a real touch
+ * lands: a hybrid laptop reads as keyboard until a finger says otherwise.
+ */
+let touchUi =
+  typeof window !== 'undefined' &&
+  typeof window.matchMedia === 'function' &&
+  window.matchMedia('(hover: none) and (pointer: coarse)').matches;
+
+if (typeof window !== 'undefined') {
+  window.addEventListener(
+    'pointerdown',
+    (e: PointerEvent) => {
+      if (e.pointerType === 'touch' || e.pointerType === 'pen') touchUi = true;
+    },
+    { capture: true, passive: true },
+  );
+}
+
+export const isTouchUi = (): boolean => touchUi;
+
 export const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
 export const clamp01 = (v: number): number => (v < 0 ? 0 : v > 1 ? 1 : v);
 export const easeOutCubic = (t: number): number => 1 - (1 - t) ** 3;

@@ -1,5 +1,5 @@
 /**
- * Overlays: PRESS [SPACE] (phase off), death card (share artifact), title card,
+ * Overlays: the power-on prompt (phase off), death card (share artifact), title card,
  * and the sticky note — the note lives on `noteLayer`, OUTSIDE the CRT stack
  * (it's paper taped over the monitor, not part of the feed).
  */
@@ -17,12 +17,27 @@ import {
   easeOutCubic,
   frames,
   glowTex,
+  isTouchUi,
   lerp,
   tex,
   VT323,
 } from './util';
 
 type CeremonyOption = { id: ChipId; name: string; blurb: string };
+
+/**
+ * Every prompt that names an input, in both dialects. A phone has no space bar
+ * and a keyboard has no tap, so the prompt is chosen per device (isTouchUi)
+ * rather than hedged into "PRESS SPACE OR TAP" — the monitor speaks one
+ * language to whoever is in front of it.
+ */
+const PROMPTS = {
+  key: { press: 'PRESS [SPACE]', talk: 'HOLD [SPACE] TO TALK', again: 'PRESS ANY KEY' },
+  touch: { press: 'TAP TO START', talk: 'HOLD TO TALK', again: 'TAP TO CONTINUE' },
+} as const;
+
+const prompts = (): { press: string; talk: string; again: string } =>
+  isTouchUi() ? PROMPTS.touch : PROMPTS.key;
 
 const NOTE_TEXT = "IF BROKEN: turn the main computer OFF and ON. It's on floor 15. — M.";
 
@@ -109,6 +124,7 @@ export class Overlays {
   private noteFallV = -1;
   private titleSub: Text;
   private titleSubShown = -1;
+  private touchPrompts = isTouchUi();
 
   private t = 0;
 
@@ -117,13 +133,13 @@ export class Overlays {
     this.press = vt(12, 0x9a7a2a);
     this.press.anchor.set(0.5);
     this.press.position.set(VIEW_W / 2, VIEW_H / 2);
-    this.press.text = 'PRESS [SPACE]';
+    this.press.text = prompts().press;
     this.press.alpha = 0;
 
     this.hint = vt(12, 0x9a7a2a);
     this.hint.anchor.set(0.5);
     this.hint.position.set(VIEW_W / 2, 196); // lower third, above the caption line
-    this.hint.text = 'HOLD [SPACE] TO TALK';
+    this.hint.text = prompts().talk;
     this.hint.alpha = 0;
 
     this.cardScanTex = canvasTex(1, 2, (ctx) => {
@@ -629,10 +645,10 @@ export class Overlays {
 
     this.pressAny = vt(11, AMBER_DIM);
     this.pressAny.anchor.set(0.5);
-    this.pressAny.text = 'PRESS ANY KEY';
+    this.pressAny.text = prompts().again;
     this.pressAny.position.set(W / 2, H - 16);
 
-    // 1px amber border pulsing gently around PRESS ANY KEY
+    // 1px amber border pulsing gently around the restart prompt
     const paW = this.pressAny.width + 12;
     const paH = this.pressAny.height + 4;
     this.pressAnyBox = new Graphics()
@@ -690,6 +706,15 @@ export class Overlays {
 
   update(ui: UiState, dt: number): void {
     this.t += dt;
+
+    // A finger landing on a hybrid device flips the dialect mid-session; the
+    // two standing prompts follow it. The death card is rebuilt per death and
+    // so reads the dialect fresh on its own.
+    if (isTouchUi() !== this.touchPrompts) {
+      this.touchPrompts = isTouchUi();
+      this.press.text = prompts().press;
+      this.hint.text = prompts().talk;
+    }
 
     // phase off: black + dim PRESS [SPACE], fading in after 1s
     const off = ui.phase === 'off';

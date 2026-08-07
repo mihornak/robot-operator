@@ -87,7 +87,25 @@ export interface MicDiagnosis {
 /** Below this peak RMS across a whole press, no usable audio arrived at all. */
 export const SILENT_RMS = 0.008;
 
-export class WebSpeechSource implements CommandSource {
+/**
+ * A CommandSource that owns a microphone. The director needs four things off
+ * one of these that the bare CommandSource contract does not carry — permission
+ * warmup, the fault diagnosis behind the mic-help card, the live level for the
+ * VU, and the runner-up transcripts. Two implementations exist and exactly one
+ * is chosen per browser: WebSpeechSource (recognition on the device) and
+ * LlmSpeechSource (no recognition anywhere in the browser — record and send).
+ */
+export interface MicCommandSource extends CommandSource {
+  warmup(): Promise<void>;
+  diagnose(): MicDiagnosis;
+  /** Live input RMS, 0..1-ish. */
+  readonly level: number;
+  /** Runner-up STT hypotheses for the last press; empty when there is no
+   *  local recognizer to have runners-up. */
+  readonly alternatives: string[];
+}
+
+export class WebSpeechSource implements MicCommandSource {
   private ctor = detectCtor();
   private _available = this.ctor !== null;
   private utterCb: ((u: Utterance) => void) | null = null;

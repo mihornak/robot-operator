@@ -566,6 +566,44 @@ function floorTwoTeachesRouteChoice(): string | null {
  * damage output, and the robot is parked and made immortal so the window is a
  * fixed number of print beats rather than however long it survived.
  */
+/**
+ * THE BOSS STARTS THE FIGHT. It shipped able to be woken by exactly one thing —
+ * a bolt landing in it — so an operator who walked into the arena without
+ * shooting got a boss that watched them, and the exam was opt-in.
+ *
+ * Two halves, and the second is the one that will rot: it must be asleep when
+ * the doors open (the arena's first beat is a still room), and awake once the
+ * robot has crossed the floor. A single assertion on either side passes for
+ * both a boss that never wakes and a boss that is awake on arrival.
+ */
+function bossWakesOnApproach(): string | null {
+  const s = initialState(99);
+  loadFloor(s, 5);
+  wakeRobot(s);
+  clearBriefing(s);
+  const boss = s.entities.find((e) => e.kind === 'fusedShredder');
+  if (!boss) return 'FAIL: the boss floor has no shredder';
+  if (boss.state !== 'dormant') {
+    return 'FAIL: the shredder is awake before the robot has taken a step — the arena opens on a still room';
+  }
+  // Walk in. No attack order anywhere: this is the whole point.
+  setOrder(s, { kind: 'goto', targetId: 'elevB' });
+  let wokeAt = -1;
+  let wakeEvents = 0;
+  for (let t = 0; t < 900; t++) {
+    step(s);
+    for (const ev of s.events) if (ev.type === 'boss_wake') wakeEvents++;
+    if (wokeAt < 0 && boss.state !== 'dormant') wokeAt = t;
+  }
+  if (wokeAt < 0) {
+    return `FAIL: the shredder never woke — the robot crossed the arena to ${Math.round(dist(s.robot.pos, boss.pos))}px and it was still scenery`;
+  }
+  // Exactly one: the director hangs the roar and the music on this event, and a
+  // repeat would retrigger both every tick the boss spends near the robot.
+  if (wakeEvents !== 1) return `FAIL: boss_wake fired ${wakeEvents} times, expected exactly 1`;
+  return null;
+}
+
 function bossPrintsItsOwnAdds(): string | null {
   const s = initialState(1234);
   loadFloor(s, 5);
@@ -717,6 +755,8 @@ export function runSelftest(): string {
   if (lessonFail) return lessonFail;
   const leakFail = bossFloorDoesNotLeak();
   if (leakFail) return leakFail;
+  const bossWakeFail = bossWakesOnApproach();
+  if (bossWakeFail) return bossWakeFail;
   const addsFail = bossPrintsItsOwnAdds();
   if (addsFail) return addsFail;
   const talkFail = talkStaysToddler();

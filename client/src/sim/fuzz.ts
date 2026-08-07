@@ -101,6 +101,21 @@ function runCase(
   // exactly like a navigation failure in the results. The geometry is
   // unchanged; only the trigger is off.
   for (const e of s.entities) if (e.kind === 'elevatorB') e.state = 'dark';
+  // ...and take the shredder OUT of the room, for the same reason and in the
+  // same spirit. It wakes on approach now (BOSS_NOTICE_PX) and cases start
+  // from ARBITRARY tiles, including inside its notice range, so on floor 6
+  // every errand turned into a boss fight: the robot stops to engage, eats
+  // knockback and mortars, and "never arrived" describes a robot doing exactly
+  // the right thing. Navigation is what this sweep measures; the fight is
+  // measured in selftest.ts, which wakes it deliberately.
+  //
+  // REMOVED rather than pinned dormant, because dormancy is not something the
+  // harness can hold: the wake happens mid-case, tick by tick, so setting the
+  // flag at setup does nothing. And removal costs nothing that matters here —
+  // a dormant body is invisible to every system navigation touches (it is not
+  // in the separation pass, not a routing obstacle, not a threat), so the
+  // geometry the robot walks through is genuinely unchanged.
+  s.entities = s.entities.filter((e) => e.kind !== 'fusedShredder');
   s.robot.pos = { x: from.x, y: from.y };
   const target = s.entities.find((e) => e.id === targetId);
   if (!target) return null;

@@ -345,6 +345,7 @@ export type SimEventType =
   | 'mortar_launch' // a blast zone was painted — { radius, fuse }
   | 'mortar_impact' // it went off — { radius, hit }
   | 'zone_dodge' // robot bailed out of a live blast zone
+  | 'boss_wake' // the shredder stood up — the arena's one irreversible beat
   | 'boss_phase' // boss crossed an hp threshold — { phase }
   | 'weapon_idea'; // robot has an opinion about which gun to use
 
@@ -469,6 +470,16 @@ export interface ParsedCommand {
   insult?: boolean;
   /** Where the parse came from (server sets). */
   source?: 'llm' | 'local';
+  /**
+   * What the model heard, when the utterance arrived as audio (`ParseRequest.
+   * audio`) and the client therefore has no transcript of its own. It exists
+   * so the rolling `recent` dialogue still has the player's side in it — a
+   * robot that cannot remember what you just said is not a companion.
+   *
+   * NEVER RENDERED (CLAUDE.md rule 6). The robot repeats back in its own words
+   * via ack_line; the raw transcript is for context only.
+   */
+  heard?: string;
 }
 
 export interface ParseEntity {
@@ -487,7 +498,14 @@ export interface ParseEntity {
 }
 
 export interface ParseRequest {
+  /** Empty string when `audio` carries the utterance instead. */
   utterance: string;
+  /**
+   * The press as sound, for clients whose browser cannot transcribe (iOS).
+   * When set, the model listens instead of reading `utterance`, and returns
+   * what it heard in `ParsedCommand.heard`.
+   */
+  audio?: AudioClip | null;
   /** Runner-up STT hypotheses for the SAME audio, best-first, excluding
    *  `utterance`. Browser speech recognition mangles homophones ("go to steps
    *  right" for "go two steps right") — the model reconciles them. */
@@ -599,10 +617,40 @@ export interface LogBatch {
 
 // ---------------------------------------------------------------- voice input
 
+/**
+ * A push-to-talk recording: 16 kHz mono 16-bit WAV, base64, no data: prefix.
+ *
+ * This is the ears for browsers that have none. Safari — every browser on iOS —
+ * ships no SpeechRecognition at all, so on a phone the whole voice game is
+ * dead without this. The clip rides straight into /api/parse and the parse
+ * model listens to it; there is no separate transcription hop, because a
+ * second round trip on a mobile connection is the difference between a robot
+ * that answers and a robot that lags.
+ *
+ * WAV specifically: OpenRouter takes base64 wav/mp3, and MediaRecorder gives
+ * webm/opus on Chrome and mp4/aac on Safari — neither reliably accepted, and
+ * transcoding on the server is a codec dependency this bundle will not have.
+ * Raw PCM out of WebAudio, downsampled and RIFF-wrapped in ~40 lines, is the
+ * one path that is identical on every browser.
+ */
+export interface AudioClip {
+  /** base64 of the WAV bytes. */
+  data: string;
+  format: 'wav';
+  /** Clip duration in ms — for logging and the empty-press diagnosis. */
+  ms: number;
+}
+
 export interface Utterance {
   text: string;
   shouted: boolean;
   source: 'speech' | 'typed';
+  /**
+   * Set instead of `text` by a source with no local recognition: the words are
+   * still inside the audio and only the parse model can read them. Anything
+   * consuming an Utterance must handle `text === ''` with `audio` set.
+   */
+  audio?: AudioClip;
 }
 
 /** Any input that produces player utterances. NOTHING may assume a mic exists. */
@@ -630,6 +678,7 @@ export type GamePhase =
 /** Why the mic produced nothing, and what the player can do about it. */
 export type MicFault =
   | 'unsupported' // no SpeechRecognition in this browser
+  | 'noServer' // no local recognition AND the server has no model to listen with
   | 'denied' // permission refused / blocked
   | 'silent' // permission fine, but zero audio energy reached us — wrong input device
   | 'noWords'; // audio arrived, recognition returned no words (accent/noise/language)
@@ -807,6 +856,21 @@ export interface AudioEngine {
   /** Fetch+decode+play a voice mp3 URL through the radio chain. Throws on 404. */
   playVoiceUrl(url: string): Promise<void>;
   stopVoice(): void;
+  /**
+   * Start a looping music bed from a bundled file (see client/public/music).
+   * Resolves false when there is no track to play — music is the one layer the
+   * game is allowed to be missing, exactly like the voice bank in rule 8, and a
+   * boss fight with no soundtrack must still be a boss fight.
+   */
+  playMusic(url: string, opts?: { volume?: number; fadeMs?: number }): Promise<boolean>;
+  /**
+   * Fetch + decode a bed WITHOUT playing it. Called when the floor that needs
+   * it loads, so the track is in memory before the beat that starts it — a
+   * megabyte arriving after the roar is music that begins in the wrong place.
+   */
+  prefetchMusic(url: string): Promise<void>;
+  /** Fade the bed out and drop it. Safe to call when nothing is playing. */
+  stopMusic(fadeMs?: number): void;
   /** Room-tone hum level 0..1. */
   setHum(level: number): void;
   /** Synth beeps for teletype/OSD ticks. */
