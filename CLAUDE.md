@@ -57,6 +57,14 @@ Read `GAME_SPEC.md` (systems) and `FIRST_MINUTES.md` (feel; wins on feel).
 - `pnpm test` — check + selftest + fuzz. Run before calling anything done.
 - `tools/level-designer.html` — draw floors in a browser, paste the exported
   `FloorDef` into `client/src/sim/floors.ts`.
+- `/lab.html` (`pnpm dev`, then <http://localhost:5173/lab.html>) — the graphics
+  lab: one hand-dressed room, a full deferred-lighting stack, and ~100 tunables
+  on live sliders. It is a research surface, not part of the game: nothing in
+  `client/src/` imports `client/src/lab/`, and it deliberately ignores the
+  palette law in rule 7 so the question "what if the light did the work?" can be
+  answered before anything is proposed for the shipping renderer. Read
+  `client/src/lab/README.md` before touching it — in particular the four rules
+  it was debugged into, which are the ones any 2D lighting work here will hit.
 - `pnpm sprites [name…]` — bake 3D models (asset-store `.glb`/`.fbx`/`.blend`)
   into pixel sprites via headless Blender. Jobs in `tools/sprites.json`, sources
   in gitignored `art-src/`, output PNGs in `client/src/art/sprites/`, manifest
