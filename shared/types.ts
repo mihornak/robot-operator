@@ -347,7 +347,9 @@ export type SimEventType =
   | 'zone_dodge' // robot bailed out of a live blast zone
   | 'boss_wake' // the shredder stood up — the arena's one irreversible beat
   | 'boss_phase' // boss crossed an hp threshold — { phase }
-  | 'weapon_idea'; // robot has an opinion about which gun to use
+  | 'weapon_idea' // robot has an opinion about which gun to use
+  | 'trigger_fired' // an authored level trigger went off — id = trigger id, `actions` = the presentation half
+  | 'tiles_changed'; // the walkability grid was rewritten (a door opened) — render must rebuild the tilemap
 
 export interface SimEvent {
   type: SimEventType;
@@ -355,6 +357,12 @@ export interface SimEvent {
   id?: string;
   /** Extra payload, event-specific. */
   data?: Record<string, string | number>;
+  /**
+   * `trigger_fired` only: the actions the SIM refused to execute because they
+   * are presentation (say/sfx/hum/shake). A separate field rather than a widened
+   * `data` so the existing string|number payloads stay exactly as strict.
+   */
+  actions?: TriggerAction[];
 }
 
 export interface SimState {
@@ -380,6 +388,338 @@ export interface SimState {
   events: SimEvent[];
   /** Sim halts (during boot/ceremony robot AI still idles; enemies freeze only when true). */
   frozen: boolean;
+  /** Authored triggers for the CURRENT floor, with their edge-detection state.
+   *  Rebuilt by loadFloor; empty on every floor that authored none. */
+  triggers: TriggerRuntime[];
+}
+
+// ---------------------------------------------------------------- authored levels
+
+/**
+ * A level drawn in the designer (`client/designer.html`) rather than written as
+ * a TS builder. Levels are DATA — plain object literals saved to
+ * `client/src/levels/<id>.level.ts` — and `levelToFloorDef` in
+ * `client/src/sim/levelLoader.ts` turns one into the same `FloorDef` the
+ * hand-authored floors are.
+ */
+export interface LevelMeta {
+  /** Slug [a-z0-9-], unique. It IS the file name, so it is also the save key. */
+  id: string;
+  name: string;
+  /** Sort key among custom levels; they are appended to the built-ins in this order. */
+  order: number;
+  /**
+   * REPLACE a built-in floor instead of appending after it. 1-based, and it is
+   * the same number `?floor=N` takes: `replaces: 1` makes this level BE floor 1,
+   * so it boots the run, wears floor 1's ceremonies and sits in front of the
+   * built-in that would otherwise be there. Absent (the normal case) means
+   * appended after the built-ins in `order`, which can never enter the run.
+   *
+   * Out of range or claimed twice is a BUILD failure, not a silent reshuffle —
+   * `sim/floors.ts` records it and `sim/selftest.ts` fails on it. The slot keeps
+   * its built-in in the meantime, which is the only degradation that leaves the
+   * game playable while the message is being read.
+   */
+  replaces?: number;
+  /**
+   * Dressing seed for the lit renderer: floor tile variants and dust. Authored
+   * rather than derived so a level looks the same every time it is opened —
+   * "reseed until it looks right" is a design decision and has to be saveable.
+   */
+  seed?: number;
+}
+
+/** A tile-space region. Px space is `tx * TILE` … `(tx + tw) * TILE`. */
+export interface TileRect {
+  tx: number;
+  ty: number;
+  tw: number;
+  th: number;
+}
+
+/**
+ * What a trigger does. The split is load-bearing: `wake`/`spawn`/`setTiles`/
+ * `power` change the WORLD and run inside the deterministic sim, while
+ * `say`/`sfx`/`hum`/`shake`/`light` are presentation and ride out on the
+ * `trigger_fired` event for the director. A sim that spoke would be a sim that
+ * needs a mixer; a sim that dimmed a lamp would be a sim that needs a renderer.
+ */
+export type TriggerAction =
+  /** A robot line, verbatim. MUST obey the toddler-speak bible (rule 7). */
+  | { type: 'say'; line: string }
+  /** `at` gives it a place in the room: volume falls off from the robot. */
+  | { type: 'sfx'; sound: SfxName; at?: Vec }
+  /** Clear 'dormant' on an entity id — the ambush. */
+  | { type: 'wake'; target: string }
+  | { type: 'spawn'; entity: LevelEntityDef }
+  /** Doors: rewrite walkability under the authored tiles. */
+  | { type: 'setTiles'; tiles: Array<{ tx: number; ty: number; solid: boolean }> }
+  /** Light or kill an elevator (elevator B's `dark` gate). */
+  | { type: 'power'; target: string; on: boolean }
+  | { type: 'hum'; level: number }
+  | { type: 'shake'; ms: number }
+  /**
+   * Drive an authored light: kill the tubes, slam the bay to a red strobe.
+   * `target` is a `LightPlacement.id`. Presentation, like `say` — the lightmap
+   * is not part of the world the sim reasons about, and a floor with no lit
+   * data simply has nothing to address.
+   */
+  | { type: 'light'; target: string; on?: boolean; intensity?: number };
+
+export interface TriggerDef {
+  id: string;
+  rect: TileRect;
+  /** Which edge of the rect the ROBOT CENTRE has to cross. */
+  when: 'enter' | 'exit';
+  /** Default true — a trigger that repeats is the exception, not the rule. */
+  once?: boolean;
+  actions: TriggerAction[];
+}
+
+/** Per-floor runtime half of a TriggerDef. Lives on SimState. */
+export interface TriggerRuntime {
+  def: TriggerDef;
+  fired: boolean;
+  /** Was the robot inside the rect on the previous evaluated tick? */
+  inside: boolean;
+}
+
+/**
+ * A sound anchored to a PLACE. Not a sim concept — the sim neither reads nor
+ * emits these; `client/src/audio/emitters.ts` walks them each frame against the
+ * robot's position.
+ */
+export interface SoundEmitterDef {
+  id: string;
+  /** Px, world space. */
+  pos: Vec;
+  sound: SfxName;
+  /** Full volume at the centre, silent at this distance. */
+  radiusPx: number;
+  /** Looping ambience (default) vs one-shot fired on entering the radius. */
+  loop?: boolean;
+  /** 0..1 base level, default 1. */
+  volume?: number;
+}
+
+/** One placed thing. Fields left out fall back to the built-in floor defaults. */
+export interface LevelEntityDef {
+  id: string;
+  kind: EntityKind;
+  tx: number;
+  ty: number;
+  label?: string;
+  option?: ChipId;
+  hp?: number;
+  dormant?: boolean;
+  /** elevatorB only: unpowered until something lights it. */
+  dark?: boolean;
+}
+
+// -------------------------------------------------------- authored lighting
+//
+// The data half of `client/src/render/lit`. NAMES AND NUMBERS ONLY: the drawer
+// tables (which pixels a `desk` is made of, what a `sconce` looks like) stay
+// client-side, because the sim and the server have no use for a canvas.
+//
+// Two different tile conventions live here and they are not interchangeable:
+// decor anchors at `tx * TILE` (fractional tiles, top-left origin) while a
+// light sits at `tx * TILE + TILE/2` (the centre of the tile it is over). Both
+// are the conventions the room was authored in, and moving either one moves
+// every placement ever saved.
+
+/**
+ * Every prop the lit renderer can draw. Mirrors the keys of `DECOR` in
+ * `client/src/render/lit/decor.ts`, which `satisfies Record<DecorName, …>` —
+ * so adding a prop there without adding it here is a type error, not a
+ * mystery at runtime.
+ */
+export type DecorName =
+  | 'desk'
+  | 'desk_toppled'
+  | 'chair_wreck'
+  | 'filing_cabinet'
+  | 'shelf_unit'
+  | 'boxes'
+  | 'pallet'
+  | 'barrel'
+  | 'rubble'
+  | 'ceiling_tile'
+  | 'pipe_run'
+  | 'crate_stack'
+  | 'plant_dead'
+  | 'puddle'
+  | 'cable_coil'
+  | 'paper_scatter'
+  | 'ceiling_lamp'
+  | 'wall_lamp'
+  | 'server_rack'
+  | 'terminal'
+  | 'vending'
+  | 'exit_sign'
+  | 'alarm_strobe'
+  | 'floor_strip'
+  | 'sparks_box'
+  | 'pipe_bank'
+  | 'locker_row'
+  | 'water_cooler'
+  | 'whiteboard'
+  | 'breaker_panel'
+  | 'floor_fan'
+  | 'coat_rack'
+  | 'trolley';
+
+export interface DecorPlacement {
+  id: string;
+  name: DecorName;
+  /** FRACTIONAL tiles; px = t * TILE. */
+  tx: number;
+  ty: number;
+  flip?: boolean;
+  /** Footprint that blocks light and darkens the floor, px, centred on the
+   *  anchor. Defaults to the DECOR entry's own; omit for flat props. */
+  foot?: [number, number];
+  /** Mirror this prop into the wet-floor layer (only shows inside a WetPatch). */
+  reflect?: boolean;
+  /** Draw above everything — ceiling fixtures, hanging signs. */
+  ceiling?: boolean;
+  /** Links this sprite to a LightPlacement and a FixtureDef of the same id. */
+  fixtureId?: string;
+  /** Which mount the fixture uses. Defaults to 'ceiling'. */
+  fixtureKind?: 'ceiling' | 'wall';
+}
+
+export interface LightPlacement {
+  id: string;
+  /** FRACTIONAL tiles; px = t * TILE + TILE/2. */
+  tx: number;
+  ty: number;
+  radius: number;
+  color: number;
+  intensity: number;
+  kind?: 'point' | 'cone';
+  /** Cone facing, radians (0 = +x). */
+  dir?: number;
+  /** Cone half-angle, radians. */
+  spread?: number;
+  /** Bakes shadow volumes. Costs a full-screen pass — accents leave it off. */
+  castShadow?: boolean;
+  /** 0 = steady, 1 = a dying fluorescent tube. */
+  flicker?: number;
+  flickerHz?: number;
+  /** False for lights that should not fill the air with haze or dust. */
+  volumetric?: boolean;
+  /** Multiplies the level's radius scale, so one lamp can stay small. */
+  scale?: number;
+}
+
+/**
+ * The authored state of one light FIXTURE — the sprite, never the light. In the
+ * graphics lab this lived in slider state, one bag for all seven lamps; a level
+ * needs it per fixture, so it is data.
+ */
+export interface FixtureDef {
+  id: string;
+  kind: 'ceiling' | 'wall';
+  /** A key of LAMP_STYLES / WALL_STYLES in render/lit/fixtures.ts. */
+  style: string;
+  scale?: number;
+  bodyAlpha?: number;
+  glow?: number;
+  /** Wall mounts only: where the housing sits on its 16px wall face, and where
+   *  its light hangs relative to the housing. */
+  mountY?: number;
+  lightX?: number;
+  lightY?: number;
+  /** Scales the co-located wall-wash point that lights the fixture's own wall. */
+  spill?: number;
+}
+
+/** An ellipse of standing water. Tile coords, tile radii. */
+export interface WetPatch {
+  tx: number;
+  ty: number;
+  rx: number;
+  ry: number;
+}
+
+export interface TileAuthoring {
+  /** Rows that carry the hazard walkway stripe. A lane has to be a LINE, so it
+   *  is authored per ROW rather than scattered per tile. */
+  walkRows?: number[];
+  /** Forced floor variants, by the index contract in render/lit/litTiles.ts
+   *  (0-2 plain, 3 crack, 4 grate, 5 lifted panel, 6 hazard stripe, 7 stain). */
+  overrides?: Array<{ tx: number; ty: number; variant: number }>;
+}
+
+/**
+ * The look of one level. Every key is optional and overrides an engine default
+ * (`LOOK_DEFAULTS` in render/lit/types.ts) — a level stores only what it moved,
+ * so retuning the engine retunes every level that did not disagree.
+ */
+export interface LevelLook {
+  ambientLevel?: number;
+  ambientColor?: number;
+  fogColor?: number;
+  fogAmount?: number;
+  fogHeight?: number;
+  lightGain?: number;
+  lightRadiusScale?: number;
+  lightFalloff?: number;
+  lightFlicker?: number;
+  lightSpill?: number;
+  volumeStrength?: number;
+  volumeWidth?: number;
+  volumeLength?: number;
+  dustAmount?: number;
+  dustBrightness?: number;
+  reflectOn?: boolean;
+  reflectAlpha?: number;
+  reflectSquash?: number;
+  reflectWobble?: number;
+  exposure?: number;
+  contrast?: number;
+  saturation?: number;
+  gamma?: number;
+  liftColor?: number;
+  liftAmount?: number;
+  gainColor?: number;
+  gainAmount?: number;
+}
+
+/**
+ * The lit half of a level, as it travels from `LevelData` through `FloorDef` to
+ * the renderer. Nothing resolves it on the way: the sim carries it and ignores
+ * it, and `render/lit` is the only place that knows what a default is.
+ */
+export interface LevelLit {
+  seed?: number;
+  lights?: LightPlacement[];
+  decor?: DecorPlacement[];
+  fixtures?: FixtureDef[];
+  wetPatches?: WetPatch[];
+  look?: LevelLook;
+  tiles?: TileAuthoring;
+}
+
+export interface LevelData {
+  meta: LevelMeta;
+  /** Exactly TILES_Y rows × TILES_X chars; '#' is solid. */
+  map: string[];
+  /** Tile coords. Defaults to elevator A, like every hand-authored floor. */
+  spawn?: { tx: number; ty: number };
+  entities: LevelEntityDef[];
+  triggers: TriggerDef[];
+  sounds: SoundEmitterDef[];
+  // ---- lit rendering, all optional. A level carrying ANY of these renders
+  // through render/lit; a level carrying none renders on the classic path, so
+  // every v1 level still loads and the built-in floors are untouched.
+  lights?: LightPlacement[];
+  decor?: DecorPlacement[];
+  fixtures?: FixtureDef[];
+  wetPatches?: WetPatch[];
+  look?: LevelLook;
+  tiles?: TileAuthoring;
 }
 
 // ---------------------------------------------------------------- parser (LLM) contract
@@ -788,6 +1128,18 @@ export interface RenderView {
   /** ALL sim events since the last render frame (multiple steps may run per
    *  frame; sim.events only holds the LAST step's). Render reacts to these. */
   frameEvents: SimEvent[];
+  /**
+   * The authored lighting of the floor currently loaded, or null on a floor
+   * that has none — which is every built-in one.
+   *
+   * It rides the per-frame view rather than a `setFloor` call for the same
+   * reason `solid` does: the renderer picks its path by comparing
+   * `sim.floorIndex` against what it has mounted, and a floor load that
+   * forgot to tell the renderer would leave the old room's lights burning
+   * over the new room's walls. Reading it every frame makes that
+   * unrepresentable.
+   */
+  lit?: LevelLit | null;
 }
 
 /** One-shot visual effects the director can trigger. Implemented by render. */
@@ -805,6 +1157,13 @@ export interface RenderApp {
   /** Called every rAF with the current view. Render owns interpolation/tweens. */
   render(view: RenderView): void;
   fx: RenderFx;
+  /**
+   * Drive an authored light — the `light` trigger action. A no-op on a floor
+   * with no lit data and on an id that floor never placed: a level is allowed
+   * to be edited down to fewer lamps without the trigger that dimmed one
+   * becoming a crash.
+   */
+  setLight(id: string, state: { on?: boolean; intensity?: number }): void;
 }
 
 // ---------------------------------------------------------------- audio
@@ -847,10 +1206,23 @@ export type SfxName =
  */
 export type DamageChannel = 'contact' | 'projectile' | 'blast' | 'hazard';
 
+/**
+ * A running loop with a live fader — what a positional ambience needs and a
+ * one-shot cannot give it. Handed out by `AudioEngine.startLoop`; a loop with no
+ * buffer behind it returns a handle that does nothing, so callers never branch.
+ */
+export interface LoopHandle {
+  /** 0..1, ramped rather than stepped (no zipper on a moving robot). */
+  setGain(v: number): void;
+  stop(): void;
+}
+
 export interface AudioEngine {
   /** Must be called from a user gesture. Starts hum. */
   init(): Promise<void>;
   playSfx(name: SfxName, opts?: { volume?: number; rate?: number }): void;
+  /** Start `name` looping at `volume` (default 0 — bring it up with setGain). */
+  startLoop(name: SfxName, opts?: { volume?: number }): LoopHandle;
   /** Play robot voice MP3 bytes through the radio chain. Resolves when playback ends. */
   playVoiceBytes(bytes: ArrayBuffer): Promise<void>;
   /** Fetch+decode+play a voice mp3 URL through the radio chain. Throws on 404. */

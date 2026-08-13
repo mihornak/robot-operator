@@ -10,7 +10,19 @@ import { Container, Sprite, type Texture } from 'pixi.js';
 import type { ArtAtlas, ChipId, RobotState, UiState } from '@shared/types';
 import { makeRng } from '@shared/rng';
 import type { FxSystem } from './fx';
+import type { ActorPart } from './lit/types';
 import { canvasTex, frames, Interp, lerp, tex } from './util';
+
+/** The robot's pose this frame, as the lit renderer's actor contract. */
+export interface RobotRig {
+  x: number;
+  y: number;
+  rotation: number;
+  scaleX: number;
+  scaleY: number;
+  visible: boolean;
+  parts: ActorPart[];
+}
 
 /** robot_head frame order E,SE,S,SW,W,NW,N,NE (screen y-down: +45° = SE). */
 const HEAD_E = 0;
@@ -416,6 +428,54 @@ export class RobotView {
       iy + this.recoilY + hopY + slump + wakeLift,
     );
     this.container.zIndex = iy + 7;
+  }
+
+  /**
+   * The pose this frame, as the lit renderer's actor contract.
+   *
+   * On a lit floor the robot is not drawn from this container at all — the
+   * silhouette, the rim light and the projected shadows have to come from
+   * `LitScene`, which needs the parts as data. Everything above still runs and
+   * still owns the animation; this is a read of the result, so there is exactly
+   * one place that decides what the robot looks like at a given moment.
+   *
+   * That includes the parts everyone reaches for first when the feel is wrong:
+   * the death slump's tilt, the bump squash, the powerdown tint and the
+   * additive damage flash all ride out of here as plain numbers.
+   */
+  rig(): RobotRig {
+    const parts: ActorPart[] = [];
+    for (const sp of [this.wheels, this.body, this.head]) {
+      parts.push({
+        texture: sp.texture,
+        x: sp.x,
+        y: sp.y,
+        tint: sp.tint,
+        additive: sp.blendMode === 'add',
+      });
+    }
+    for (const sp of this.nubSp.values()) {
+      if (!sp.visible) continue;
+      // nubs anchor at their BOTTOM edge inside a container that rides the
+      // shoulder line; actor parts are centre-anchored, hence the half-height.
+      parts.push({
+        texture: sp.texture,
+        x: this.nubs.x + sp.x,
+        y: this.nubs.y - sp.texture.height / 2,
+      });
+    }
+    if (this.fuseSp.visible) {
+      parts.push({ texture: this.fuseSp.texture, x: this.fuseSp.x, y: this.fuseSp.y });
+    }
+    return {
+      x: this.container.x,
+      y: this.container.y,
+      rotation: this.container.rotation,
+      scaleX: this.container.scale.x,
+      scaleY: this.container.scale.y,
+      visible: this.container.visible,
+      parts,
+    };
   }
 
   /** Debris kicked outward as the robot launches out of the pile. */

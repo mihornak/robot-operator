@@ -1,7 +1,7 @@
 /**
- * Custom post filters for the lab. WebGL only — the lab app forces
- * `preference: 'webgl'`, so a GlProgram alone is enough and we skip writing
- * every shader twice in WGSL.
+ * Custom post filters for the lit renderer. WebGL only — the lab and the game
+ * both force `preference: 'webgl'`, so a GlProgram alone is enough and we skip
+ * writing every shader twice in WGSL.
  *
  * One filter does the whole grade + lens pass. Splitting exposure, contrast,
  * saturation, tint, vignette, chroma, grain and scanlines into eight filters
@@ -141,7 +141,7 @@ export class GradeFilter extends Filter {
     const glProgram = GlProgram.from({
       vertex: VERT,
       fragment: GRADE_FRAG,
-      name: 'lab-grade',
+      name: 'lit-grade',
     });
     super({
       glProgram,
@@ -200,7 +200,7 @@ export class LightmapFilter extends Filter {
     const glProgram = GlProgram.from({
       vertex: VERT,
       fragment: LIGHTMAP_FRAG,
-      name: 'lab-lightmap',
+      name: 'lit-lightmap',
     });
     super({
       glProgram,

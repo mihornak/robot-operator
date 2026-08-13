@@ -32,12 +32,30 @@ Read `GAME_SPEC.md` (systems) and `FIRST_MINUTES.md` (feel; wins on feel).
 - `shared/` — types, intents, art manifest, rng. Imported by client (alias `@shared`) and server (relative).
 - `client/src/sim/` — deterministic sim: state, step, floors, robot behavior tree.
 - `client/src/render/` — PixiJS v8 only: stage, tilemap, sprites, CRT stack, OSD.
+  `render/lit/` is the deferred-lighting renderer (lightmap, shadow volumes,
+  decor, fixtures, grade). It is driven by plain data (`SceneDef`), so the same
+  code serves the graphics lab, the designer preview and a lit level in game.
+  Read `client/src/render/lit/README.md` before touching any of it.
 - `client/src/art/` — code-drawn pixel textures (canvas → pixi textures) per `shared/artManifest.ts`, plus `sprites/` (build-time 3D bakes, see rule 10).
 - `client/src/audio/` — WebAudio: sfx, voice playback (radio-processed), hum. iOS resume handling.
 - `client/src/voice/` — CommandSource impls: WebSpeech (push-to-talk), LlmSpeech
   (records the press to 16 kHz WAV and lets the parse model listen — the ears
   for Safari/iOS, which ship no SpeechRecognition), Teletype. Exactly one mic
   source is chosen per browser; `?stt=llm` forces the recorded path.
+- `client/src/designer/` — the level designer (`/designer.html`), a third Vite
+  entry. Nothing in `client/src/` imports it; it imports the game, so what it
+  draws is the real renderer. Read `client/src/designer/README.md`.
+- `client/src/levels/` — designer-authored levels as data, one `LevelData` per
+  `<id>.level.ts`, plus the partly generated registry `index.ts` (the
+  `designer:` markers in it are the save endpoint's contract). `sim/floors.ts`
+  loads them through `sim/levelLoader.ts` one of two ways. Without
+  `meta.replaces` a level is APPENDED after the built-ins: reached with
+  `?floor=N`, never part of the shipping run. With `meta.replaces: N` (1-based,
+  the same number `?floor=N` takes) it STANDS IN for built-in floor N and is
+  what the player plays — floor 1 today is `floor-1-copy.level.ts`. A slot that
+  is out of range or claimed twice is a `pnpm test` failure, and the room
+  contracts in `sim/selftest.ts` that read a replaced floor's built-in content
+  skip with a printed note.
 - `client/src/net/` — `/api/parse`, `/api/tts`, `/api/log` client.
 - `client/src/game/` — director: beats, script, ceremonies, death card. The only place that wires subsystems.
 - `server/` — Hono: `/api/parse` (OpenRouter), `/api/tts` (ElevenLabs proxy + disk cache), `/api/log`, serves `client/dist` in prod.
@@ -55,16 +73,23 @@ Read `GAME_SPEC.md` (systems) and `FIRST_MINUTES.md` (feel; wins on feel).
   tests only cover routes their author imagined; this is what catches "the robot
   won't fetch things".
 - `pnpm test` — check + selftest + fuzz. Run before calling anything done.
-- `tools/level-designer.html` — draw floors in a browser, paste the exported
-  `FloorDef` into `client/src/sim/floors.ts`.
+- `/designer.html` (`pnpm dev`, then <http://localhost:5173/designer.html>) —
+  the level designer: draw a floor, dress and light it, check it, playtest it,
+  save it. Save is `POST /__designer/save`, a dev-only Vite plugin that writes
+  `client/src/levels/<id>.level.ts` and upserts the registry — so the button is
+  absent from a built bundle, which has no server to answer it. Read
+  `client/src/designer/README.md`.
+  (`tools/level-designer.html`, the tiles-only predecessor, is superseded.)
 - `/lab.html` (`pnpm dev`, then <http://localhost:5173/lab.html>) — the graphics
-  lab: one hand-dressed room, a full deferred-lighting stack, and ~100 tunables
-  on live sliders. It is a research surface, not part of the game: nothing in
-  `client/src/` imports `client/src/lab/`, and it deliberately ignores the
-  palette law in rule 7 so the question "what if the light did the work?" can be
-  answered before anything is proposed for the shipping renderer. Read
-  `client/src/lab/README.md` before touching it — in particular the four rules
-  it was debugged into, which are the ones any 2D lighting work here will hit.
+  lab: one hand-dressed room over `render/lit`, with ~100 tunables on live
+  sliders. It is a tuning surface, not part of the game: nothing in
+  `client/src/` imports `client/src/lab/` (imports flow lab → render/lit, never
+  back), and it deliberately ignores the near-monochrome palette law so the
+  question "what if the light did the work?" can be answered before anything is
+  proposed for the shipping look. Read `client/src/render/lit/README.md` before
+  touching the renderer — in particular the five rules it was debugged into,
+  which are the ones any 2D lighting work here will hit — and
+  `client/src/lab/README.md` for the panel.
 - `pnpm sprites [name…]` — bake 3D models (asset-store `.glb`/`.fbx`/`.blend`)
   into pixel sprites via headless Blender. Jobs in `tools/sprites.json`, sources
   in gitignored `art-src/`, output PNGs in `client/src/art/sprites/`, manifest

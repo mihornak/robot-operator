@@ -1,18 +1,19 @@
 /**
- * Lab tileset. Same 16px grid and same 3/4 read as the shipping tiles, but
- * drawn against the lab ramp (cool navy-slate) and with more variants, because
- * a lit room shows tiling repetition that a dark one hides.
+ * Lit tileset. Same 16px grid and same 3/4 read as the classic tiles, but drawn
+ * against the lit ramp (cool navy-slate) and with more variants, because a lit
+ * room shows tiling repetition that a dark one hides.
  *
  * Everything stays LOW VALUE on purpose — the brightest pixel here is L.v8. All
  * the brightness in this scene arrives from the lightmap, so a tile that is
  * already bright has nowhere to go when a lamp hits it.
  */
 
-import type { Px } from '../art/px';
+import type { Px } from '../../art/px';
 import { L, M, W } from './palette';
 
 /**
- * FLOOR VARIANT INDEX — scene.ts picks by number, so this list is a contract:
+ * FLOOR VARIANT INDEX — scene.ts picks by number and `TileAuthoring.overrides`
+ * addresses them from level data, so this list is a contract:
  *  0,1,2 plain deck panels (three grime seeds; the common case must not repeat)
  *  3     panel seam + hairline crack
  *  4     drain grate
@@ -26,7 +27,7 @@ const WALL_VARIANTS = 4;
 export const FLOOR_PLAIN = [0, 1, 2] as const;
 export const FLOOR_STRIPE = 6;
 
-export const LAB_TILE_FRAMES = {
+export const LIT_TILE_FRAMES = {
   floor: FLOOR_VARIANTS,
   wallFace: WALL_VARIANTS,
 } as const;
@@ -39,7 +40,7 @@ export const LAB_TILE_FRAMES = {
  */
 const SEAM = '#2f3945';
 
-export function drawLabFloor(p: Px, frame: number): void {
+export function drawLitFloor(p: Px, frame: number): void {
   p.r(0, 0, 16, 16, L.v3);
   // Top and left edges only. Both edges plus the bottom draws a box, and a grid
   // of boxes reads as graph paper — the tile has to imply a joint, not draw one.
@@ -121,7 +122,7 @@ export function drawLabFloor(p: Px, frame: number): void {
  * Wall face (south-facing). Variants: 0 plain panel + conduit, 1 vent grille,
  * 2 stencilled number + bolts, 3 damaged — panel torn off, framing behind.
  */
-export function drawLabWallFace(p: Px, frame: number): void {
+export function drawLitWallFace(p: Px, frame: number): void {
   p.r(0, 0, 16, 16, L.v5);
   p.hl(0, 0, 16, L.v8); // top edge catches the ceiling bounce
   p.hl(0, 1, 16, L.v6);
@@ -198,7 +199,7 @@ export function drawLabWallFace(p: Px, frame: number): void {
  * look like a lit room with a hole in it. The relief is one step of the ramp;
  * you should read it as structure without ever looking at it directly.
  */
-export function drawLabWallTop(p: Px, _frame: number): void {
+export function drawLitWallTop(p: Px, _frame: number): void {
   // Not the darkest value on the ramp. A block of near-black in the middle of a
   // lit floor reads as a HOLE, not as a solid standing in the way — and this
   // room is mostly free-standing pillars, so it would be full of holes. One
@@ -216,7 +217,7 @@ export function drawLabWallTop(p: Px, _frame: number): void {
 }
 
 /** Soft contact shadow bleeding down from a wall onto the floor below it. */
-export function drawLabTileShadow(p: Px, _frame: number): void {
+export function drawLitTileShadow(p: Px, _frame: number): void {
   for (let y = 0; y < 16; y++) {
     const t = Math.max(0, 1 - y / 11);
     const a = 0.55 * t * t;

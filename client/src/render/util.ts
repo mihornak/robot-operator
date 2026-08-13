@@ -55,6 +55,29 @@ export const frames = (art: ArtAtlas, name: ArtName): Texture[] =>
 export const anchorOf = (name: ArtName): [number, number] =>
   (ART[name] as ArtEntry).anchor ?? [0.5, 0.5];
 
+/**
+ * Where a lit actor's sprite sits, for art drawn at `name` and scaled by `scale`.
+ *
+ * Two conversions, and both show up as furniture floating an inch off the deck
+ * when they are wrong:
+ *
+ *  - **y.** A lit `ActorPart` is always centred and offset by `y`; the art
+ *    manifest anchors a sprite wherever it was drawn to sit. A sprite anchored
+ *    at `ay` covers the same pixels as a centred one offset by `h * (0.5 - ay)`.
+ *  - **foot.** The drop from the origin to the floor — what the projected
+ *    shadow hinges on and what the y-sort keys off. For a body standing on the
+ *    bottom edge of its own sprite, `h * (1 - ay)`.
+ *
+ * Both `render/litWorld.ts` (the game) and `designer/litActors.ts` (the editing
+ * view) turn sim bodies into actors, and these two numbers are the whole of the
+ * conversion. They live here so the two callers cannot drift apart.
+ */
+export function actorPlacement(name: ArtName, scale = 1): { y: number; foot: number } {
+  const h = ART[name].h;
+  const ay = anchorOf(name)[1];
+  return { y: h * scale * (0.5 - ay), foot: h * scale * (1 - ay) };
+}
+
 /** djb2 — stable per-entity phase seeds for presentation rng. */
 export function hashStr(s: string): number {
   let h = 5381;
@@ -110,6 +133,29 @@ export function canvasTex(
   if (ctx) draw(ctx);
   const t = Texture.from(c);
   t.source.scaleMode = 'nearest';
+  return t;
+}
+
+/**
+ * Soft glow squashed into an ellipse, baked at the size it will be drawn.
+ *
+ * The classic path gets this shape by scaling a round glow non-uniformly, which
+ * a lit actor part cannot do — its scale is one number, because a part that
+ * could stretch could also disagree with the silhouette projected from it.
+ */
+export function ellipseGlow(w: number, h: number, color: string): Texture {
+  const t = canvasTex(w, h, (ctx) => {
+    ctx.translate(w / 2, h / 2);
+    ctx.scale(1, h / w);
+    const g = ctx.createRadialGradient(0, 0, 1, 0, 0, w / 2);
+    g.addColorStop(0, color);
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(0, 0, w / 2, 0, Math.PI * 2);
+    ctx.fill();
+  });
+  t.source.scaleMode = 'linear'; // gradients band badly under nearest
   return t;
 }
 

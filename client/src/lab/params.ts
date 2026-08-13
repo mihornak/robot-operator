@@ -12,7 +12,7 @@
  * holds — no CDN, no remote assets, everything code-drawn.
  */
 
-import { LAMP_STYLE_NAMES, WALL_STYLE_NAMES } from './fixtures';
+import { LAMP_STYLE_NAMES, WALL_STYLE_NAMES } from '../render/lit/fixtures';
 
 export type ParamKind = 'num' | 'bool' | 'color' | 'select';
 
@@ -34,7 +34,6 @@ export interface Params {
   // ---------------------------------------------------------------- ambient
   ambientLevel: number;
   ambientColor: number;
-  ambientWarmBias: number;
   fogColor: number;
   fogAmount: number;
   fogHeight: number;
@@ -45,9 +44,6 @@ export interface Params {
   lightRadiusScale: number;
   lightFalloff: number;
   lightFlicker: number;
-  keyColor: number;
-  fillColor: number;
-  accentColor: number;
   emissiveGain: number;
   lightSpill: number;
 
@@ -208,7 +204,6 @@ export interface Params {
 export const DEFAULTS: Params = {
   ambientLevel: 0.245,
   ambientColor: 0x518ae6,
-  ambientWarmBias: 0.35,
   fogColor: 0x223349,
   fogAmount: 0.47,
   fogHeight: 1,
@@ -217,9 +212,6 @@ export const DEFAULTS: Params = {
   lightRadiusScale: 0.55,
   lightFalloff: 1,
   lightFlicker: 0.22,
-  keyColor: 0xffb774,
-  fillColor: 0x5778ff,
-  accentColor: 0x2ee89a,
   emissiveGain: 1.01,
   lightSpill: 0.6,
   shadowsOn: true,
@@ -392,7 +384,6 @@ export const SCHEMA: readonly ParamSpec[] = [
   // ambient
   n('ambientLevel', 'Ambient', 'ambient level', 0, 1, 0.005, 'how lit the unlit world is'),
   c('ambientColor', 'Ambient', 'ambient color', 'color of everything shadowed'),
-  n('ambientWarmBias', 'Ambient', 'warm bias', 0, 1, 0.01, 'pulls ambient toward the key hue'),
   c('fogColor', 'Ambient', 'haze color'),
   n('fogAmount', 'Ambient', 'haze amount', 0, 1, 0.01, 'flat atmospheric wash over the room'),
   n('fogHeight', 'Ambient', 'haze gradient', 0, 1, 0.01, '0 = flat, 1 = pools at the bottom'),
@@ -403,9 +394,6 @@ export const SCHEMA: readonly ParamSpec[] = [
   n('lightRadiusScale', 'Lights', 'radius scale', 0.2, 3, 0.01),
   n('lightFalloff', 'Lights', 'falloff exponent', 0.5, 4, 0.05, 'higher = tighter pools'),
   n('lightFlicker', 'Lights', 'flicker', 0, 2, 0.01),
-  c('keyColor', 'Lights', 'key (warm)'),
-  c('fillColor', 'Lights', 'fill (cool)'),
-  c('accentColor', 'Lights', 'accent'),
   n('emissiveGain', 'Lights', 'emissive gain', 0, 3, 0.01, 'brightness of glowing sprites'),
   n('lightSpill', 'Lights', 'colour spill', 0, 1.5, 0.01, 'how much a light tints a surface that has no such colour of its own'),
 
@@ -540,13 +528,20 @@ export const GROUPS: readonly string[] = [
   ...new Set(SCHEMA.map((s) => s.group)),
 ];
 
-/** Named looks the panel can jump to. Partial — unset keys keep DEFAULTS. */
+/**
+ * Named looks the panel can jump to. Partial — unset keys keep DEFAULTS.
+ *
+ * There is no global key/fill/accent colour here, and there never was one that
+ * worked: a light's colour is per-instance data on the LightPlacement, which is
+ * what the renderer has always honoured. The four swatches that used to sit in
+ * this file moved nothing on screen. Recolour a look through ambient, haze and
+ * the grade's lift/gain — or edit the rig.
+ */
 export const PRESETS: Record<string, Partial<Params>> = {
   Default: {},
   'Flat (old look)': {
     ambientLevel: 0.85,
     ambientColor: 0xffffff,
-    ambientWarmBias: 0,
     fogAmount: 0,
     lightGain: 0.25,
     shadowsOn: false,
@@ -566,8 +561,6 @@ export const PRESETS: Record<string, Partial<Params>> = {
     ambientColor: 0x1d2a44,
     fogColor: 0x16223a,
     fogAmount: 0.3,
-    keyColor: 0xffa24d,
-    fillColor: 0x3f7ccc,
     lightGain: 1.25,
     lightFalloff: 2.3,
     bloomScale: 1.15,
@@ -591,9 +584,6 @@ export const PRESETS: Record<string, Partial<Params>> = {
     ambientColor: 0x1d3a30,
     fogColor: 0x1c4438,
     fogAmount: 0.34,
-    keyColor: 0xd8ff7a,
-    fillColor: 0x2ad0a0,
-    accentColor: 0xff5b3c,
     saturation: 1.35,
     bloomScale: 1.1,
   },
@@ -602,9 +592,6 @@ export const PRESETS: Record<string, Partial<Params>> = {
     ambientColor: 0x2a1418,
     fogColor: 0x3a1218,
     fogAmount: 0.3,
-    keyColor: 0xff4a3a,
-    fillColor: 0x8a2230,
-    accentColor: 0xffd08a,
     lightFlicker: 1.0,
     saturation: 1.2,
     contrast: 1.2,

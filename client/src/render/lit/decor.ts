@@ -1,5 +1,5 @@
 /**
- * LAB DECOR — the room's furniture, drawn in the lab palette.
+ * LIT DECOR — a room's furniture, drawn in the lit palette.
  *
  * Everything here is deliberately UNDERLIT. The scene's brightness arrives from
  * the lightmap pass, so a prop that already looks lit will blow out the moment
@@ -13,8 +13,11 @@
  * plants an object on the floor; skip it and everything floats.
  */
 
-import type { Drawer, Px } from '../art/px';
+import type { DecorName } from '@shared/types';
+import type { Drawer, Px } from '../../art/px';
 import { E, L, M, S, W } from './palette';
+
+export type { DecorName };
 
 /** Emissive constants are numbers (the lightmap wants them that way). */
 const c = (n: number): string => '#' + n.toString(16).padStart(6, '0');
@@ -1410,6 +1413,11 @@ export const DECOR = {
       p.scatter(3, 12, 17, 2, W.rustSh, 0.07, 311); // rust along the lower deck
     },
   },
-} as const satisfies Record<string, DecorEntry>;
+// `Record<DecorName, …>` and not `Record<string, …>`: the name list lives in
+// shared/types.ts so levels can be typed against it, and this is what keeps the
+// two from drifting. A prop added here and not there fails to compile, which is
+// the only version of "keep in sync" that survives a hackathon.
+} as const satisfies Record<DecorName, DecorEntry>;
 
-export type DecorName = keyof typeof DECOR;
+/** Every name, for asset pickers. Order is the table's — grouped by kind. */
+export const DECOR_NAMES = Object.keys(DECOR) as DecorName[];

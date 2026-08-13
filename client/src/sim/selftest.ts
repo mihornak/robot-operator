@@ -3,10 +3,11 @@
  * bit-identical JSON state every tick. Also sanity-checks floor maps and the
  * pinned entity ids the director depends on.
  */
-import type { SimState, Vec } from '../../../shared/types';
+import type { Entity, SimState, Vec } from '../../../shared/types';
 import { TILE, TILES_X, TILES_Y } from '../../../shared/types';
 import { ALL_TALK_LINES, smallTalk } from '../../../shared/smallTalk';
-import { FLOORS, buildSolid } from './floors';
+import type { FloorDef } from './floors';
+import { FLOORS, REPLACEMENT_ERRORS, buildSolid, isReplacedFloor } from './floors';
 import {
   addAvoid,
   applyBrain,
@@ -43,6 +44,120 @@ const PINNED_IDS: string[][] = [
   ['elevA', 'elevB', 'boss1', 'crate_ROCKET', 'chair1'],
 ];
 
+/**
+ * Ids `PINNED_IDS` has no row for — every designer level appended after the
+ * built-ins. Those floors are authored in a browser, not pinned by hand, so
+ * what is checked is the contract the director actually needs: the elevators
+ * exist. Without this the suite crashes on `undefined` for any appended floor
+ * instead of reporting something a reader could act on.
+ *
+ * A REPLACED slot (`meta.replaces`) takes the same derived treatment even
+ * though PINNED_IDS has a row for it. The row describes the built-in that USED
+ * to stand there — asserting `chip_memory` against a level someone drew in the
+ * designer is asserting that the replacement is a copy of the thing it replaced,
+ * which is the one thing it is guaranteed not to be.
+ */
+function pinnedFor(floorIndex: number, ents: readonly Entity[]): readonly string[] {
+  const row = isReplacedFloor(floorIndex) ? undefined : PINNED_IDS[floorIndex];
+  return (
+    row ?? ents.filter((e) => e.kind === 'elevatorA' || e.kind === 'elevatorB').map((e) => e.id)
+  );
+}
+
+/** Where the robot starts this floor — elevator A unless the floor says otherwise. */
+export function spawnOf(def: FloorDef, ents: readonly Entity[]): Vec | null {
+  return def.spawn ?? ents.find((e) => e.kind === 'elevatorA')?.pos ?? null;
+}
+
+/** The ASCII map parses into a grid at all. Returns the parse error as text. */
+export function checkMapParse(map: string[]): string | null {
+  try {
+    buildSolid(map);
+    return null;
+  } catch (err) {
+    return `map is malformed: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
+export function checkEntitiesInWalls(solid: boolean[][], ents: readonly Entity[]): string | null {
+  for (const e of ents) {
+    if (solidAtPx(solid, e.pos.x, e.pos.y)) return `entity '${e.id}' spawns inside a wall`;
+  }
+  return null;
+}
+
+/** Ids are how the director, the parser and every order name a thing. Two
+ *  entities sharing one means half the floor is addressing the other. */
+export function checkUniqueIds(ents: readonly Entity[]): string | null {
+  const ids = new Set<string>();
+  for (const e of ents) {
+    if (ids.has(e.id)) return `two entities share the id '${e.id}'`;
+    ids.add(e.id);
+  }
+  return null;
+}
+
+/**
+ * Authored triggers point at things that exist and cover ground that exists.
+ * A trigger whose rect is off the map or whose `wake` names a deleted machine
+ * is not an error at runtime — it is a beat that silently never happens.
+ */
+export function checkTriggerDefs(def: FloorDef, ents: readonly Entity[]): string | null {
+  const ids = new Set(ents.map((e) => e.id));
+  const lightIds = new Set((def.lit?.lights ?? []).map((l) => l.id));
+  const seen = new Set<string>();
+  for (const t of def.triggers ?? []) {
+    if (seen.has(t.id)) return `two triggers share the id '${t.id}'`;
+    seen.add(t.id);
+    const { tx, ty, tw, th } = t.rect;
+    if (tw <= 0 || th <= 0) return `trigger '${t.id}' has an empty rect`;
+    if (tx < 0 || ty < 0 || tx + tw > TILES_X || ty + th > TILES_Y) {
+      return `trigger '${t.id}' has a rect outside the map`;
+    }
+    for (const a of t.actions) {
+      if ((a.type === 'wake' || a.type === 'power') && !ids.has(a.target)) {
+        return `trigger '${t.id}' ${a.type}s '${a.target}', which is not on this floor`;
+      }
+      if (a.type === 'light' && !lightIds.has(a.target)) {
+        return `trigger '${t.id}' drives light '${a.target}', which is not on this floor`;
+      }
+      if (a.type === 'setTiles') {
+        for (const c of a.tiles) {
+          if (c.tx < 0 || c.ty < 0 || c.tx >= TILES_X || c.ty >= TILES_Y) {
+            return `trigger '${t.id}' sets a tile outside the map`;
+          }
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Every per-floor check, in the order that gives the most useful first failure.
+ * The designer's validation panel calls the pieces individually; the suite
+ * calls this. One implementation either way — a browser tool stricter (or
+ * laxer) than the build is a tool that lies.
+ */
+export function checkFloor(def: FloorDef): string | null {
+  const parseFail = checkMapParse(def.map);
+  if (parseFail) return parseFail;
+  const solid = buildSolid(def.map);
+  const ents = def.entities();
+  const spawn = spawnOf(def, ents);
+  if (!spawn) return 'has no spawn point';
+  if (solidAtPx(solid, spawn.x, spawn.y)) return 'spawns the robot inside a wall';
+  return (
+    checkEntitiesInWalls(solid, ents) ??
+    checkUniqueIds(ents) ??
+    checkChipClearance(solid, ents) ??
+    checkRoutable(solid, spawn, ents) ??
+    checkHostileFit(solid, spawn, ents) ??
+    checkCrateDistance(spawn, ents) ??
+    checkTriggerDefs(def, ents)
+  );
+}
+
 /** Floor INDICES the behaviour tests reach for by name, so a reshuffle of the
  *  running order is a one-line edit here instead of a hunt through the file.
  *  The boss floor is appended at index 5, which is why these all still hold. */
@@ -50,6 +165,7 @@ const FLOOR_ISLAND_I = 1; // the island that blocks the straight A→B line
 const FLOOR_MOVEMENT_I = 2; // two doors, one wired
 const FLOOR_GAUNTLET_I = 3; // roaming printer, open colonnade
 const FLOOR_MACHINE_I = 4; // three machines and the fuse run
+const FLOOR_BOSS_I = 5; // the shredder arena
 /** Floors the shipping run actually plays. Index 5 is the trailer-only boss
  *  arena, reached by `?floor=6` and never by clearing floor 5. */
 const AUTHORED_FLOORS = 5;
@@ -124,19 +240,17 @@ function script(t: number, s: SimState): void {
  * With real routing, an unreachable exit is a soft-locked floor, so it is a
  * build failure now.
  */
-function floorsRoutable(): string | null {
-  for (let i = 0; i < FLOORS.length; i++) {
-    const def = FLOORS[i];
-    const solid = buildSolid(def.map);
-    const ents = def.entities();
-    const spawn = def.spawn ?? ents.find((e) => e.id === 'elevA')!.pos;
-    for (const e of ents) {
-      // Decor and hazards may sit anywhere; anything the robot is expected to
-      // reach must have a route from where it starts the floor.
-      if (e.kind === 'debris' || e.kind === 'cable' || e.kind === 'elevatorA') continue;
-      if (findPath(solid, spawn, e.pos, ROBOT_R).length === 0) {
-        return `FAIL: floor index ${i} has no route from spawn to '${e.id}'`;
-      }
+export function checkRoutable(
+  solid: boolean[][],
+  spawn: Vec,
+  ents: readonly Entity[],
+): string | null {
+  for (const e of ents) {
+    // Decor and hazards may sit anywhere; anything the robot is expected to
+    // reach must have a route from where it starts the floor.
+    if (e.kind === 'debris' || e.kind === 'cable' || e.kind === 'elevatorA') continue;
+    if (findPath(solid, spawn, e.pos, ROBOT_R).length === 0) {
+      return `has no route from spawn to '${e.id}'`;
     }
   }
   return null;
@@ -146,15 +260,12 @@ function floorsRoutable(): string | null {
  * A floor whose only chip can't be walked into is a dead reward. Verify each
  * chip sits on open floor with room for the robot's r=7 body around it.
  */
-function chipsReachable(): string | null {
-  for (let i = 0; i < FLOORS.length; i++) {
-    const solid = buildSolid(FLOORS[i].map);
-    for (const e of FLOORS[i].entities()) {
-      if (e.kind !== 'chip') continue;
-      for (const [dx, dy] of [[0, 0], [-8, 0], [8, 0], [0, -8], [0, 8]] as const) {
-        if (solidAtPx(solid, e.pos.x + dx, e.pos.y + dy)) {
-          return `FAIL: floor index ${i} chip '${e.id}' has no clearance at (${dx},${dy})`;
-        }
+export function checkChipClearance(solid: boolean[][], ents: readonly Entity[]): string | null {
+  for (const e of ents) {
+    if (e.kind !== 'chip') continue;
+    for (const [dx, dy] of [[0, 0], [-8, 0], [8, 0], [0, -8], [0, 8]] as const) {
+      if (solidAtPx(solid, e.pos.x + dx, e.pos.y + dy)) {
+        return `chip '${e.id}' has no clearance at (${dx},${dy})`;
       }
     }
   }
@@ -329,18 +440,13 @@ function reportsThreatsInsteadOfCharging(): string | null {
  * looked at the room, and never sees the box closed at all. Every crate has to
  * be somewhere you walk to.
  */
-function cratesAreSomewhereToWalkTo(): string | null {
+export function checkCrateDistance(spawn: Vec, ents: readonly Entity[]): string | null {
   const MIN = CRATE_NOTICE + 40; // notice radius plus a real walk
-  for (let i = 0; i < FLOORS.length; i++) {
-    const def = FLOORS[i];
-    const ents = def.entities();
-    const spawn = def.spawn ?? ents.find((e) => e.id === 'elevA')!.pos;
-    for (const e of ents) {
-      if (e.kind !== 'crate') continue;
-      const d = dist(spawn, e.pos);
-      if (d < MIN) {
-        return `FAIL: floor index ${i} crate '${e.id}' is ${Math.round(d)}px from spawn — it opens itself before the player sees it (want ≥${MIN})`;
-      }
+  for (const e of ents) {
+    if (e.kind !== 'crate') continue;
+    const d = dist(spawn, e.pos);
+    if (d < MIN) {
+      return `crate '${e.id}' is ${Math.round(d)}px from spawn — it opens itself before the player sees it (want ≥${MIN})`;
     }
   }
   return null;
@@ -452,35 +558,33 @@ function fitReaches(seen: Uint8Array, to: Vec): boolean {
  * Runs on every floor, at whatever radius each kind actually has, so the boss
  * arena is checked at r=13 without the earlier floors needing a special case.
  */
-function bossArenaFitsEnemies(): string | null {
-  for (let i = 0; i < FLOORS.length; i++) {
-    const def = FLOORS[i];
-    const solid = buildSolid(def.map);
-    const ents = def.entities();
-    const spawn = def.spawn ?? ents.find((e) => e.id === 'elevA')!.pos;
-    const exit = ents.find((e) => e.id === 'elevB')?.pos ?? null;
-    // One field per radius per floor — 30×16 tiles at 4px is nothing, and two
-    // bodies of the same width share the same answer.
-    const fields = new Map<number, Uint8Array>();
-    for (const e of ents) {
-      if (!HOSTILE_KINDS.has(e.kind)) continue;
-      const r = radiusOf(e);
-      let fit = fields.get(r);
-      if (!fit) {
-        fit = fitField(solid, r);
-        fields.set(r, fit);
-      }
-      if (!bodyFits(solid, e.pos.x, e.pos.y, r)) {
-        return `FAIL: floor index ${i} '${e.id}' is wedged — an r=${r} body does not fit where it spawns`;
-      }
-      const seen = fitReach(fit, e.pos);
-      if (!seen) return `FAIL: floor index ${i} '${e.id}' has nowhere to stand at r=${r}`;
-      if (!fitReaches(seen, spawn)) {
-        return `FAIL: floor index ${i} '${e.id}' cannot reach the robot spawn at r=${r} — a passage on the way is too narrow for its body`;
-      }
-      if (exit && !fitReaches(seen, exit)) {
-        return `FAIL: floor index ${i} '${e.id}' cannot reach elevator B at r=${r} — it can never contest the way out`;
-      }
+export function checkHostileFit(
+  solid: boolean[][],
+  spawn: Vec,
+  ents: readonly Entity[],
+): string | null {
+  const exit = ents.find((e) => e.kind === 'elevatorB')?.pos ?? null;
+  // One field per radius per floor — 30×16 tiles at 4px is nothing, and two
+  // bodies of the same width share the same answer.
+  const fields = new Map<number, Uint8Array>();
+  for (const e of ents) {
+    if (!HOSTILE_KINDS.has(e.kind)) continue;
+    const r = radiusOf(e);
+    let fit = fields.get(r);
+    if (!fit) {
+      fit = fitField(solid, r);
+      fields.set(r, fit);
+    }
+    if (!bodyFits(solid, e.pos.x, e.pos.y, r)) {
+      return `'${e.id}' is wedged — an r=${r} body does not fit where it spawns`;
+    }
+    const seen = fitReach(fit, e.pos);
+    if (!seen) return `'${e.id}' has nowhere to stand at r=${r}`;
+    if (!fitReaches(seen, spawn)) {
+      return `'${e.id}' cannot reach the robot spawn at r=${r} — a passage on the way is too narrow for its body`;
+    }
+    if (exit && !fitReaches(seen, exit)) {
+      return `'${e.id}' cannot reach elevator B at r=${r} — it can never contest the way out`;
     }
   }
   return null;
@@ -578,7 +682,7 @@ function floorTwoTeachesRouteChoice(): string | null {
  */
 function bossWakesOnApproach(): string | null {
   const s = initialState(99);
-  loadFloor(s, 5);
+  loadFloor(s, FLOOR_BOSS_I);
   wakeRobot(s);
   clearBriefing(s);
   const boss = s.entities.find((e) => e.kind === 'fusedShredder');
@@ -606,7 +710,7 @@ function bossWakesOnApproach(): string | null {
 
 function bossPrintsItsOwnAdds(): string | null {
   const s = initialState(1234);
-  loadFloor(s, 5);
+  loadFloor(s, FLOOR_BOSS_I);
   wakeRobot(s);
   clearBriefing(s);
   const boss = s.entities.find((e) => e.id === 'boss1');
@@ -715,50 +819,85 @@ function talkStaysToddler(): string | null {
   return null;
 }
 
+/**
+ * THE CONTRACT AUDIT.
+ *
+ * Half the behaviour tests above are pinned to a floor INDEX because they are
+ * really tests of a ROOM: the island that blocks the straight line, the two
+ * doors of which one bites, the machine that must be reported rather than
+ * charged, the shredder. Replace that room with a level someone drew in the
+ * designer and the assertion stops describing anything — it does not become
+ * false, it becomes meaningless, and the difference matters because a suite
+ * that fails for a reason nobody can act on is a suite people start ignoring.
+ *
+ * So a contract whose floor has been replaced is SKIPPED and says so, once, in
+ * the line `pnpm selftest` prints. The contracts that test the ROBOT rather
+ * than the room (initiative, the briefing hold, the boss floor not leaking,
+ * determinism itself) keep running on whatever floor is standing there — that
+ * is the point of them, and a replacement that breaks one has broken the game.
+ */
+function auditContracts(notes: string[]): string | null {
+  const onFloors = (
+    what: string,
+    floors: readonly number[],
+    fn: () => string | null,
+  ): string | null => {
+    const gone = floors.filter(isReplacedFloor);
+    if (gone.length > 0) {
+      notes.push(
+        `note: skipped "${what}" — floor ${gone.map((i) => i + 1).join(' and ')} ` +
+          `${gone.length > 1 ? 'have' : 'has'} been replaced by a designer level, ` +
+          'so the built-in content this contract reads is not in the run',
+      );
+      return null;
+    }
+    return fn();
+  };
+
+  return (
+    onFloors('routing round an obstacle', [FLOOR_ISLAND_I], routesAroundObstacles) ??
+    onFloors('the movement floor teaches route choice', [FLOOR_MOVEMENT_I], floorTwoTeachesRouteChoice) ??
+    onFloors(
+      'threats are reported, not charged',
+      [FLOOR_GAUNTLET_I, FLOOR_MACHINE_I],
+      reportsThreatsInsteadOfCharging,
+    ) ??
+    onFloors('the boss wakes on approach', [FLOOR_BOSS_I], bossWakesOnApproach) ??
+    onFloors('the boss prints its own adds', [FLOOR_BOSS_I], bossPrintsItsOwnAdds)
+  );
+}
+
 export function runSelftest(): string {
-  // floor sanity: maps well-formed, pinned ids present, nothing spawns in a wall
+  const notes: string[] = [];
+  // A level claiming a slot that is not there, or one two levels claim, is a
+  // build failure — floors.ts cannot throw (it would black out the designer
+  // the mistake has to be fixed in), so it records and this reports.
+  if (REPLACEMENT_ERRORS.length > 0) {
+    return `FAIL: bad meta.replaces —\n  ${REPLACEMENT_ERRORS.join('\n  ')}`;
+  }
+
+  // Floor sanity, every floor including any appended designer level: maps
+  // well-formed, pinned ids present, nothing in a wall, everything reachable.
   for (let i = 0; i < FLOORS.length; i++) {
-    const solid = buildSolid(FLOORS[i].map);
     const ents = FLOORS[i].entities();
     const ids = new Set(ents.map((e) => e.id));
-    for (const id of PINNED_IDS[i]) {
+    for (const id of pinnedFor(i, ents)) {
       if (!ids.has(id)) return `FAIL: floor index ${i} missing pinned entity '${id}'`;
     }
-    for (const e of ents) {
-      if (solidAtPx(solid, e.pos.x, e.pos.y)) {
-        return `FAIL: floor index ${i} entity '${e.id}' spawns inside a wall`;
-      }
-    }
-    const spawn = FLOORS[i].spawn ?? ents.find((e) => e.id === 'elevA')?.pos;
-    if (!spawn) return `FAIL: floor index ${i} has no spawn point`;
-    if (solidAtPx(solid, spawn.x, spawn.y)) {
-      return `FAIL: floor index ${i} spawns the robot inside a wall`;
-    }
+    const fail = checkFloor(FLOORS[i]);
+    if (fail) return `FAIL: floor index ${i} ${fail}`;
   }
-  const chipFail = chipsReachable();
-  if (chipFail) return chipFail;
-  const routeFail = floorsRoutable();
-  if (routeFail) return routeFail;
-  const fitFail = bossArenaFitsEnemies();
-  if (fitFail) return fitFail;
-  const navFail = routesAroundObstacles();
-  if (navFail) return navFail;
+  // Robot contracts: these read a floor but not its contents, so they run on
+  // whatever is standing in the slot — including a replacement.
   const initFail = actsOnItsOwn();
   if (initFail) return initFail;
   const holdFail = holdsAtEveryFloor();
   if (holdFail) return holdFail;
-  const threatFail = reportsThreatsInsteadOfCharging();
-  if (threatFail) return threatFail;
-  const crateFail = cratesAreSomewhereToWalkTo();
-  if (crateFail) return crateFail;
-  const lessonFail = floorTwoTeachesRouteChoice();
-  if (lessonFail) return lessonFail;
   const leakFail = bossFloorDoesNotLeak();
   if (leakFail) return leakFail;
-  const bossWakeFail = bossWakesOnApproach();
-  if (bossWakeFail) return bossWakeFail;
-  const addsFail = bossPrintsItsOwnAdds();
-  if (addsFail) return addsFail;
+  // Room contracts: skipped, with a note, where the room has been replaced.
+  const contractFail = auditContracts(notes);
+  if (contractFail) return contractFail;
   const talkFail = talkStaysToddler();
   if (talkFail) return talkFail;
 
@@ -780,5 +919,10 @@ export function runSelftest(): string {
     }
   }
   if (a.events === 0) return 'FAIL: scripted run emitted zero events';
-  return `PASS: ${TICKS} ticks deterministic (seed 42, ${a.events} events across run)`;
+  // Notes ride AFTER the verdict: selftest-run.ts decides pass/fail on the
+  // first word, and a skipped contract is news, not a failure.
+  return [
+    `PASS: ${TICKS} ticks deterministic (seed 42, ${a.events} events across run)`,
+    ...notes,
+  ].join('\n');
 }

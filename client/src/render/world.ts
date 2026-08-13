@@ -8,8 +8,11 @@ import type { ArtAtlas, Entity, RenderView, SimEvent } from '@shared/types';
 import { TILE } from '@shared/types';
 import { ART, type ArtName } from '@shared/artManifest';
 import { makeRng } from '@shared/rng';
+import { eventFx } from './eventFx';
 import { FxSystem } from './fx';
 import { MarkerLayer } from './markers';
+import { updatePile } from './pile';
+import { ProjectileLayer } from './projectiles';
 import { RobotView } from './robot';
 import { anchorOf, frames, glowTex, hashStr, Interp, lerpColor, tex } from './util';
 
@@ -24,10 +27,10 @@ import { anchorOf, frames, glowTex, hashStr, Interp, lerpColor, tex } from './ut
  * ceremony one, and the plain crates are the ones the player actually hunts for
  * on floors 3 and 4. These land both at ~24×21 on the 480×270 feed.
  */
-const CRATE_SCALE = 1.5; // crate_triad, 16×14
-const CRATE_SCALE_PLAIN = 1.75; // crate, 14×12
+export const CRATE_SCALE = 1.5; // crate_triad, 16×14
+export const CRATE_SCALE_PLAIN = 1.75; // crate, 14×12
 /** Loose chips are tiny (7px) and are now a floor's only reward — upscale hard. */
-const CHIP_SCALE = 1.9;
+export const CHIP_SCALE = 1.9;
 
 /** Contact-shadow footprint per grounded entity: [w, h, yOffset]. */
 const SHADOW: Partial<Record<Entity['kind'], readonly [number, number, number]>> = {
@@ -43,7 +46,9 @@ const SHADOW: Partial<Record<Entity['kind'], readonly [number, number, number]>>
   chair: [13, 5, 3],
 };
 
-const KIND_ART: Record<Entity['kind'], ArtName> = {
+/** Which art entry draws each kind. The lit path (render/litWorld.ts) reads the
+ *  same table — a second copy would be a second answer to "what is a printer". */
+export const KIND_ART: Record<Entity['kind'], ArtName> = {
   scrap: 'scrap',
   chip: 'chip_item',
   debris: 'debris_pile',
@@ -80,8 +85,9 @@ interface EntView {
   frameF: number; // elevator door frame, float
   spitMs: number; // fusedPrinter: spit-frame linger after paper_thrown
   flashMs: number;
-  sparkT: number; // cable spark countdown
+  sparkT: number; // cable spark countdown / debris glint countdown
   seenBurst: boolean; // debris: one-shot wake explosion already played
+  ember: number; // debris: heap glow, held here because it decays from itself
   seen: boolean;
 }
 
@@ -93,9 +99,8 @@ export class WorldView {
 
   private tiles = new Container();
   private entLayer = new Container();
-  private projLayer = new Container();
+  private projectiles: ProjectileLayer;
   private views = new Map<string, EntView>();
-  private projs = new Map<string, { sp: Sprite; interp: Interp; phase: number; seen: boolean }>();
   private builtFloor = -1;
   private closing = new Set<string>(); // elevators told to shut by elevator_entered
   private elevBRamp = -1; // fuse_inserted glow ramp, -1 idle
@@ -116,6 +121,7 @@ export class WorldView {
   constructor(private art: ArtAtlas) {
     this.fx = new FxSystem(art);
     this.robot = new RobotView(art, this.fx);
+    this.projectiles = new ProjectileLayer(art);
     this.entLayer.sortableChildren = true;
     this.entLayer.addChild(this.robot.container);
     this.shadowTex = glowTex(32, 'rgba(0,0,0,0.85)');
@@ -134,7 +140,7 @@ export class WorldView {
       this.markers.container,
       this.entLayer,
       this.moteLayer,
-      this.projLayer,
+      this.projectiles.container,
       this.fx.container,
     );
   }
@@ -142,79 +148,15 @@ export class WorldView {
   // --------------------------------------------------------------- events
 
   handleEvent(ev: SimEvent, view: RenderView): void {
-    const rs = view.sim.robot;
+    // Sparks, parts and smoke are the same on any floor — see eventFx.ts. What
+    // is left here is what touches THIS view's state.
+    eventFx(this.fx, this.art, this.robot, ev, view);
     switch (ev.type) {
-      case 'wall_bump':
-        this.robot.onBump(rs);
-        break;
-      case 'shot_fired':
-        this.robot.onShot(rs);
-        break;
-      case 'robot_damage':
-        this.robot.onDamage(rs);
-        if (ev.data?.source === 'cable') this.fx.spark(rs.pos.x, rs.pos.y, 7);
-        break;
-      case 'robot_death':
-        this.fx.smoke(rs.pos.x, rs.pos.y - 8, 1.3);
-        this.fx.spark(rs.pos.x, rs.pos.y - 4, 5);
-        break;
       case 'enemy_hit': {
         const v = ev.id ? this.views.get(ev.id) : undefined;
         if (v) v.flashMs = 90;
-        // A tint alone gave a hit no WEIGHT: on a 34px boss that soaks dozens of
-        // them you could not tell a landed shot from a miss, which made the
-        // whole fight read as unresponsive. Sparks off the plating say "that
-        // connected" without pretending a bolt is an explosion.
-        const e = ev.id ? this.findEntity(view, ev.id) : undefined;
-        if (e) {
-          const big = e.kind === 'fusedShredder';
-          this.fx.spark(e.pos.x, e.pos.y - 2, big ? 6 : 3);
-          if (big) {
-            // Only the boss sheds parts per hit. On a printer that dies in three
-            // shots it would look like it was already coming apart.
-            this.fx.part(e.pos.x, e.pos.y - 4, tex(this.art, 'part_plate'), 0x6a6f76);
-            this.fx.flashPool(e.pos.x, e.pos.y - 2, 26, 70);
-          }
-        }
         break;
       }
-      // Every AoE detonation — boss mortar AND robot rocket. `explode()` emits
-      // one of these with the impact point, so the visual lands exactly where
-      // the damage did rather than where a sprite happened to be.
-      case 'mortar_impact': {
-        const x = Number(ev.data?.x ?? 0);
-        const y = Number(ev.data?.y ?? 0);
-        this.fx.burstMed(x, y);
-        this.fx.flashPool(x, y, 90, 200);
-        break;
-      }
-      case 'enemy_death': {
-        const e = ev.id ? this.findEntity(view, ev.id) : undefined;
-        if (!e) break;
-        if (e.kind === 'fusedShredder') {
-          // The one and only burstHuge in the game. A boss that dies with the
-          // same pop as the printers it was printing is a boss that was never
-          // worth the fight.
-          this.fx.burstHuge(e.pos.x, e.pos.y - 6);
-          for (let i = 0; i < 8; i++) {
-            this.fx.part(e.pos.x, e.pos.y - 8, tex(this.art, 'part_plate'), 0x6a6f76);
-            this.fx.part(e.pos.x, e.pos.y - 6, tex(this.art, 'paper'), 0x8a8d90);
-          }
-        } else {
-          this.fx.boom(e.pos.x, e.pos.y - 4);
-          this.fx.part(e.pos.x, e.pos.y - 6, tex(this.art, 'part_plate'), 0x6a6f76);
-          this.fx.part(e.pos.x, e.pos.y - 6, tex(this.art, 'paper'), 0x8a8d90);
-        }
-        break;
-      }
-      case 'scrap_pickup':
-        this.fx.glint(rs.pos.x, rs.pos.y - 6);
-        break;
-      case 'chip_pickup':
-        // bigger than a scrap glint — this one changes who the robot IS
-        this.fx.glint(rs.pos.x, rs.pos.y - 6);
-        this.fx.spark(rs.pos.x, rs.pos.y - 4, 6);
-        break;
       case 'paper_thrown': {
         const v = ev.id ? this.views.get(ev.id) : undefined;
         if (v) v.spitMs = 150;
@@ -226,13 +168,24 @@ export class WorldView {
       case 'elevator_entered':
         if (ev.id) this.closing.add(ev.id);
         break;
+      case 'tiles_changed':
+        // A trigger rewrote the walkability grid — the tilemap on screen is now
+        // a picture of a room that no longer exists.
+        this.markDirty();
+        break;
       default:
         break;
     }
   }
 
-  private findEntity(view: RenderView, id: string): Entity | undefined {
-    return view.sim.entities.find((e) => e.id === id);
+  /**
+   * Force a tilemap rebuild on the next frame. The floor is normally rebuilt
+   * only when floorIndex changes; a door opened by a trigger (and every
+   * structural edit in the level designer) changes the same geometry without
+   * changing the floor.
+   */
+  markDirty(): void {
+    this.builtFloor = -1;
   }
 
   // ------------------------------------------------------------- per frame
@@ -263,31 +216,7 @@ export class WorldView {
       }
     }
 
-    // projectiles
-    for (const p of this.projs.values()) p.seen = false;
-    for (const pr of sim.projectiles) {
-      let p = this.projs.get(pr.id);
-      if (!p) {
-        const sp = new Sprite(tex(this.art, pr.kind === 'bolt' ? 'bolt' : 'paper'));
-        sp.anchor.set(0.5);
-        this.projLayer.addChild(sp);
-        p = { sp, interp: new Interp(), phase: hashStr(pr.id) % 100, seen: true };
-        this.projs.set(pr.id, p);
-      }
-      p.seen = true;
-      p.interp.push(sim.tick, pr.pos.x, pr.pos.y);
-      p.sp.position.set(p.interp.x(view.alpha), p.interp.y(view.alpha));
-      const fs = frames(this.art, pr.kind === 'bolt' ? 'bolt' : 'paper');
-      p.sp.texture = fs[Math.floor(this.t * (pr.kind === 'bolt' ? 20 : 12) + p.phase) % fs.length]!;
-      p.sp.rotation =
-        pr.kind === 'bolt' ? Math.atan2(pr.vel.y, pr.vel.x) : this.t * 9 + p.phase;
-    }
-    for (const [id, p] of this.projs) {
-      if (!p.seen) {
-        p.sp.destroy();
-        this.projs.delete(id);
-      }
-    }
+    this.projectiles.update(sim, view.alpha, this.t);
 
     this.robot.update(sim.robot, view.ui, sim.tick, view.alpha, dt);
     // contact shadow keeps the robot on the floor through hops and bumps —
@@ -517,6 +446,7 @@ export class WorldView {
       flashMs: 0,
       sparkT: 1 + (hashStr(e.id) % 20) / 10,
       seenBurst: e.kind === 'debris' && e.state === 'burst',
+      ember: 0,
       seen: true,
     };
   }
@@ -615,72 +545,24 @@ export class WorldView {
         break;
       }
       case 'debris': {
-        // Frames: settled / stir left / stir right / burst-open.
-        // Pre-wake the heap breathes and the ember pulses; on the wake frame it
-        // caves in and throws parts. `pileStir` (director) drives the shudder.
-        const fs = frames(this.art, 'debris_pile');
-        const burst = e.state === 'burst';
-        const hero = e.id === 'pile1'; // the only heap with a robot in it
-        if (burst) {
-          v.body.texture = fs[3]!;
-          if (!v.seenBurst) {
-            v.seenBurst = true;
-            this.fx.smoke(x, y - 10, 1.2);
-            for (let i = 0; i < 7; i++) {
-              const a = -Math.PI / 2 + (i / 6 - 0.5) * 2.1;
-              this.fx.spawn({
-                x,
-                y: y - 12,
-                tex: frames(this.art, 'fx_spark'),
-                fps: 12,
-                life: 0.5,
-                vx: Math.cos(a) * 70,
-                vy: Math.sin(a) * 60,
-                grav: 190,
-                fade: true,
-                blend: 'add',
-                scale: 0.7,
-              });
-              this.fx.part(x, y - 12, tex(this.art, i % 2 ? 'part_plate' : 'part_antenna'), 0x6a6f76);
-            }
-          }
-          if (v.pool) v.pool.alpha = Math.max(0, v.pool.alpha - dt * 0.9);
-        } else {
-          // stir: the director pulses ui.pileStir when the thing inside moves.
-          // ONLY the heap with something in it. `ui.pileStir` is one number for
-          // the whole feed, so applying it per-heap made every pile on the
-          // floor shudder in unison — which reads as an earthquake, and throws
-          // away the one thing the opening is built on: a single silhouette
-          // that is somehow alive among a room of dead ones.
-          const stir = hero ? view.ui.pileStir : 0;
-          v.body.texture =
-            stir > 0.05 ? fs[Math.floor(t * 14) % 2 === 0 ? 1 : 2]! : fs[0]!;
-          v.root.x = x + (stir > 0.05 ? (Math.sin(t * 46) * 1.4 * stir) : 0);
-          if (v.pool && hero) {
-            // slow ember breath, brighter for a moment on every stir
-            v.pool.alpha = 0.05 + 0.05 * (0.5 + 0.5 * Math.sin(t * 1.9)) + 0.22 * stir;
-          }
-          // a lone glint escaping the heap every few seconds — "something lives"
-          if (hero) {
-            v.sparkT -= dt;
-            if (v.sparkT <= 0) {
-              v.sparkT = 2.2 + v.rng() * 2.4;
-              this.fx.spawn({
-                x: x + (v.rng() - 0.5) * 8,
-                y: y - 10,
-                tex: frames(this.art, 'fx_spark'),
-                fps: 8,
-                life: 0.5,
-                vy: -9,
-                fade: true,
-                loop: true,
-                blend: 'add',
-                scale: 0.5,
-                tint: 0xffc36b,
-              });
-            }
-          }
-        }
+        // Frames: settled / stir left / stir right / burst-open. The behaviour
+        // is shared with the lit path — see render/pile.ts.
+        const r = updatePile({
+          fx: this.fx,
+          art: this.art,
+          state: v,
+          rng: v.rng,
+          id: e.id,
+          x,
+          y,
+          burst: e.state === 'burst',
+          stir: view.ui.pileStir,
+          t,
+          dt,
+        });
+        v.body.texture = frames(this.art, 'debris_pile')[r.frame]!;
+        v.root.x = x + r.dx;
+        if (v.pool) v.pool.alpha = r.ember;
         break;
       }
       case 'crate': {

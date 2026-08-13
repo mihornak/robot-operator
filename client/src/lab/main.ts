@@ -23,7 +23,7 @@ import {
   TextureStyle,
 } from 'pixi.js';
 import { initArt } from '../art';
-import { GradeFilter } from './filters';
+import { GradeFilter } from '../render/lit/filters';
 import { P } from './params';
 import { LabScene } from './scene';
 import { createLabUi } from './ui';

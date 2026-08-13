@@ -1,7 +1,12 @@
 /**
- * THE SHOWCASE FLOOR — a hand-dressed derelict office bay, authored for one
+ * THE SHOWCASE ROOM — a hand-dressed derelict office bay, authored for one
  * purpose: to be looked at. It is not a playable floor and it obeys none of the
  * sim's walkability or pacing rules.
+ *
+ * This is the lab's copy of what a level's lit data now holds (`LevelData`'s
+ * decor/lights/fixtures/wetPatches/tiles). It stays hand-written TypeScript
+ * rather than a saved level because the lab is where those fields were designed
+ * — it has to be editable without a designer running.
  *
  * Layout notes that matter to the LIGHTING, which is the actual subject here:
  *  - two enclosed alcoves (server room top-left, admin bay top-right) so there
@@ -12,10 +17,13 @@
  *    across half the room instead of dying against a wall two tiles away
  */
 
-import { TILE } from '@shared/types';
-import type { DecorName } from './decor';
-import type { LightDef, Rect } from './lighting';
-import { E } from './palette';
+import type {
+  DecorPlacement,
+  LightPlacement,
+  TileAuthoring,
+  WetPatch,
+} from '@shared/types';
+import { E } from '../render/lit/palette';
 
 export const LAB_MAP: readonly string[] = [
   '##############################',
@@ -36,29 +44,13 @@ export const LAB_MAP: readonly string[] = [
   '##############################',
 ];
 
-export interface Placement {
-  name: DecorName;
-  /** Tile coords, fractional. Converted to px at build time. */
-  tx: number;
-  ty: number;
-  flip?: boolean;
-  /** Footprint that blocks light, in px, centred on the anchor. Omit for flat props. */
-  foot?: [number, number];
-  /** Wet-floor reflection under this prop. */
-  reflect?: boolean;
-  /** Draw above everything (ceiling fixtures). */
-  ceiling?: boolean;
-  /**
-   * For ceiling lamps: the id of the light this fixture belongs to. It is what
-   * lets the panel address one lamp at a time, and it keeps the SPRITE and the
-   * LIGHT separable — swapping a fixture's style never touches the rig.
-   */
-  fixtureId?: string;
-  /** Which control group owns this fixture. Defaults to 'ceiling'. */
-  fixtureKind?: 'ceiling' | 'wall';
-}
-
-const px = (t: number): number => t * TILE + TILE / 2;
+/**
+ * Ids are generated rather than typed out: a level saved from the designer needs
+ * one per placement so it can be selected and re-edited, and sixty hand-written
+ * slugs in this file would be sixty chances to duplicate one. Fixtures keep
+ * their own id, because that is the name the light and the FixtureDef share.
+ */
+type Dressing = Omit<DecorPlacement, 'id'>;
 
 /**
  * Dressing. Order is irrelevant — the scene y-sorts. What matters is DENSITY:
@@ -66,7 +58,7 @@ const px = (t: number): number => t * TILE + TILE / 2;
  * walls are lined and the open floor is littered. Roughly a prop every three
  * tiles along any wall, and nothing at all in the two main sightlines.
  */
-export const LAB_DECOR: readonly Placement[] = [
+const DRESSING: readonly Dressing[] = [
   // --- north wall run ---
   { name: 'shelf_unit', tx: 4.2, ty: 1.35, foot: [28, 8], reflect: true },
   { name: 'server_rack', tx: 7.5, ty: 1.4, foot: [18, 8], reflect: true },
@@ -187,6 +179,11 @@ export const LAB_DECOR: readonly Placement[] = [
   { name: 'ceiling_lamp', tx: 21.5, ty: 3.4, ceiling: true, fixtureId: 'tube_admin' },
 ];
 
+export const LAB_DECOR: readonly DecorPlacement[] = DRESSING.map((d, i) => ({
+  id: d.fixtureId ?? `${d.name}_${i}`,
+  ...d,
+}));
+
 /**
  * The lighting rig, built around ONE diagonal.
  *
@@ -203,44 +200,44 @@ export const LAB_DECOR: readonly Placement[] = [
  * Only the big ones cast; a status LED throwing a room-length shadow looks
  * absurd and costs a full-screen bake.
  */
-export const LAB_LIGHTS: readonly LightDef[] = [
+export const LAB_LIGHTS: readonly LightPlacement[] = [
   // --- key: the ceiling tubes ---
   // Five, not seven, and each one stronger. Seven overlapping pools at polite
   // intensities is a uniformly lit room with slightly brighter spots in it —
   // which is exactly what a ceiling grid looks like in an office, and exactly
   // what nobody puts on a key-art screenshot. Fewer, hotter, further apart.
-  { id: 'tube_a', x: px(6.5), y: px(6.5), radius: 152, color: E.key, intensity: 1.25, castShadow: true, flicker: 0.15, flickerHz: 7 },
-  { id: 'tube_b', x: px(16.5), y: px(6.5), radius: 170, color: E.key, intensity: 1.7, castShadow: true },
-  { id: 'tube_c', x: px(25.5), y: px(6.5), radius: 118, color: E.key, intensity: 0.45, castShadow: true, flicker: 0.9, flickerHz: 11 },
-  { id: 'tube_d', x: px(13.5), y: px(12.5), radius: 140, color: E.key, intensity: 0.62, castShadow: true },
+  { id: 'tube_a', tx: 6.5, ty: 6.5, radius: 152, color: E.key, intensity: 1.25, castShadow: true, flicker: 0.15, flickerHz: 7 },
+  { id: 'tube_b', tx: 16.5, ty: 6.5, radius: 170, color: E.key, intensity: 1.7, castShadow: true },
+  { id: 'tube_c', tx: 25.5, ty: 6.5, radius: 118, color: E.key, intensity: 0.45, castShadow: true, flicker: 0.9, flickerHz: 11 },
+  { id: 'tube_d', tx: 13.5, ty: 12.5, radius: 140, color: E.key, intensity: 0.62, castShadow: true },
   // alcove tubes — colder, so the rooms read as separate spaces from the bay
-  { id: 'tube_server', x: px(6.1), y: px(3.4), radius: 92, color: E.fill, intensity: 1.15, castShadow: true },
-  { id: 'tube_admin', x: px(21.5), y: px(3.4), radius: 96, color: E.key, intensity: 0.6, castShadow: true },
+  { id: 'tube_server', tx: 6.1, ty: 3.4, radius: 92, color: E.fill, intensity: 1.15, castShadow: true },
+  { id: 'tube_admin', tx: 21.5, ty: 3.4, radius: 96, color: E.key, intensity: 0.6, castShadow: true },
 
   // --- cone wall lamps, raking the floor ---
-  { id: 'cone_a', x: px(6.5), y: px(5.9), radius: 128, color: E.key, intensity: 0.5, kind: 'cone', dir: Math.PI / 2, spread: 0.75, castShadow: true },
-  { id: 'cone_b', x: px(20.5), y: px(5.9), radius: 120, color: E.fillCore, intensity: 0.25, kind: 'cone', dir: Math.PI / 2, spread: 0.8, castShadow: true },
+  { id: 'cone_a', tx: 6.5, ty: 5.9, radius: 128, color: E.key, intensity: 0.5, kind: 'cone', dir: Math.PI / 2, spread: 0.75, castShadow: true },
+  { id: 'cone_b', tx: 20.5, ty: 5.9, radius: 120, color: E.fillCore, intensity: 0.25, kind: 'cone', dir: Math.PI / 2, spread: 0.8, castShadow: true },
   // Re-aimed down the diagonal rather than straight across. The bottom-left
   // went fully black once tube_d dropped and tube_e was deleted, and the fix
   // for a dark corner is never fill — fill just makes it a grey corner. A cone
   // raking it at a grazing angle catches the TOPS of the pipe bank, the lockers
   // and the coat rack and leaves the floor dark, which is the whole point: you
   // get silhouettes back without spending the black point on them.
-  { id: 'cone_c', x: px(1.4), y: px(10.6), radius: 132, color: E.key, intensity: 0.5, kind: 'cone', dir: 0.72, spread: 0.62, castShadow: true },
+  { id: 'cone_c', tx: 1.4, ty: 10.6, radius: 132, color: E.key, intensity: 0.5, kind: 'cone', dir: 0.72, spread: 0.62, castShadow: true },
 
   // --- wall sconces ---
   // One per fixture, cones aimed straight down the wall so the pool lands in
   // front of the housing. Small radius and modest intensity: eight of these
   // plus the ceiling rig would flatten the room, and the ceiling rig is still
   // there — only its SPRITES are switched off.
-  { id: 'wall_admin_1', x: px(19.4), y: px(5.9), radius: 62, color: E.key, intensity: 0.5, kind: 'cone', dir: Math.PI / 2, spread: 0.85, castShadow: false },
-  { id: 'wall_admin_2', x: px(22.0), y: px(5.9), radius: 62, color: E.key, intensity: 0.5, kind: 'cone', dir: Math.PI / 2, spread: 0.85, castShadow: false },
-  { id: 'wall_admin_3', x: px(24.6), y: px(5.9), radius: 58, color: E.key, intensity: 0.42, kind: 'cone', dir: Math.PI / 2, spread: 0.85, castShadow: false, flicker: 0.5, flickerHz: 13 },
-  { id: 'wall_server_1', x: px(4.3), y: px(5.9), radius: 58, color: E.fill, intensity: 0.45, kind: 'cone', dir: Math.PI / 2, spread: 0.85, castShadow: false },
-  { id: 'wall_server_2', x: px(8.4), y: px(5.9), radius: 58, color: E.fill, intensity: 0.45, kind: 'cone', dir: Math.PI / 2, spread: 0.85, castShadow: false },
-  { id: 'wall_pillar_1', x: px(9.5), y: px(9.9), radius: 66, color: E.key, intensity: 0.5, kind: 'cone', dir: Math.PI / 2, spread: 0.85, castShadow: false },
-  { id: 'wall_pillar_2', x: px(20.5), y: px(9.9), radius: 66, color: E.key, intensity: 0.5, kind: 'cone', dir: Math.PI / 2, spread: 0.85, castShadow: false },
-  { id: 'wall_pillar_3', x: px(6.5), y: px(13.9), radius: 60, color: E.key, intensity: 0.45, kind: 'cone', dir: Math.PI / 2, spread: 0.85, castShadow: false },
+  { id: 'wall_admin_1', tx: 19.4, ty: 5.9, radius: 62, color: E.key, intensity: 0.5, kind: 'cone', dir: Math.PI / 2, spread: 0.85, castShadow: false },
+  { id: 'wall_admin_2', tx: 22.0, ty: 5.9, radius: 62, color: E.key, intensity: 0.5, kind: 'cone', dir: Math.PI / 2, spread: 0.85, castShadow: false },
+  { id: 'wall_admin_3', tx: 24.6, ty: 5.9, radius: 58, color: E.key, intensity: 0.42, kind: 'cone', dir: Math.PI / 2, spread: 0.85, castShadow: false, flicker: 0.5, flickerHz: 13 },
+  { id: 'wall_server_1', tx: 4.3, ty: 5.9, radius: 58, color: E.fill, intensity: 0.45, kind: 'cone', dir: Math.PI / 2, spread: 0.85, castShadow: false },
+  { id: 'wall_server_2', tx: 8.4, ty: 5.9, radius: 58, color: E.fill, intensity: 0.45, kind: 'cone', dir: Math.PI / 2, spread: 0.85, castShadow: false },
+  { id: 'wall_pillar_1', tx: 9.5, ty: 9.9, radius: 66, color: E.key, intensity: 0.5, kind: 'cone', dir: Math.PI / 2, spread: 0.85, castShadow: false },
+  { id: 'wall_pillar_2', tx: 20.5, ty: 9.9, radius: 66, color: E.key, intensity: 0.5, kind: 'cone', dir: Math.PI / 2, spread: 0.85, castShadow: false },
+  { id: 'wall_pillar_3', tx: 6.5, ty: 13.9, radius: 60, color: E.key, intensity: 0.45, kind: 'cone', dir: Math.PI / 2, spread: 0.85, castShadow: false },
 
   // A sconce's own cone starts BELOW it and points away, so the housing sits
   // outside its own light and gets multiplied down to nothing. These co-located
@@ -249,34 +246,34 @@ export const LAB_LIGHTS: readonly LightDef[] = [
   // lamp is bolted to, and any prop standing beside it, stayed black while the
   // floor in front blazed. Radius here is what washes the wall. Tunable per
   // fixture as `wall spill`.
-  { id: 'wall_admin_1_pt', x: px(19.4), y: px(5.7), radius: 48, color: E.key, intensity: 0.55, castShadow: false, volumetric: false },
-  { id: 'wall_admin_2_pt', x: px(22.0), y: px(5.7), radius: 48, color: E.key, intensity: 0.55, castShadow: false, volumetric: false },
-  { id: 'wall_admin_3_pt', x: px(24.6), y: px(5.7), radius: 44, color: E.key, intensity: 0.45, castShadow: false, volumetric: false, flicker: 0.5, flickerHz: 13 },
-  { id: 'wall_server_1_pt', x: px(4.3), y: px(5.7), radius: 44, color: E.fill, intensity: 0.5, castShadow: false, volumetric: false },
-  { id: 'wall_server_2_pt', x: px(8.4), y: px(5.7), radius: 44, color: E.fill, intensity: 0.5, castShadow: false, volumetric: false },
-  { id: 'wall_pillar_1_pt', x: px(9.5), y: px(9.7), radius: 48, color: E.key, intensity: 0.55, castShadow: false, volumetric: false },
-  { id: 'wall_pillar_2_pt', x: px(20.5), y: px(9.7), radius: 48, color: E.key, intensity: 0.55, castShadow: false, volumetric: false },
-  { id: 'wall_pillar_3_pt', x: px(6.5), y: px(13.7), radius: 44, color: E.key, intensity: 0.5, castShadow: false, volumetric: false },
+  { id: 'wall_admin_1_pt', tx: 19.4, ty: 5.7, radius: 48, color: E.key, intensity: 0.55, castShadow: false, volumetric: false },
+  { id: 'wall_admin_2_pt', tx: 22.0, ty: 5.7, radius: 48, color: E.key, intensity: 0.55, castShadow: false, volumetric: false },
+  { id: 'wall_admin_3_pt', tx: 24.6, ty: 5.7, radius: 44, color: E.key, intensity: 0.45, castShadow: false, volumetric: false, flicker: 0.5, flickerHz: 13 },
+  { id: 'wall_server_1_pt', tx: 4.3, ty: 5.7, radius: 44, color: E.fill, intensity: 0.5, castShadow: false, volumetric: false },
+  { id: 'wall_server_2_pt', tx: 8.4, ty: 5.7, radius: 44, color: E.fill, intensity: 0.5, castShadow: false, volumetric: false },
+  { id: 'wall_pillar_1_pt', tx: 9.5, ty: 9.7, radius: 48, color: E.key, intensity: 0.55, castShadow: false, volumetric: false },
+  { id: 'wall_pillar_2_pt', tx: 20.5, ty: 9.7, radius: 48, color: E.key, intensity: 0.55, castShadow: false, volumetric: false },
+  { id: 'wall_pillar_3_pt', tx: 6.5, ty: 13.7, radius: 44, color: E.key, intensity: 0.5, castShadow: false, volumetric: false },
 
   // --- accents: cheap, no shadow pass ---
-  { id: 'rack_1', x: px(7.5), y: px(1.6), radius: 34, color: E.accent, intensity: 0.7, castShadow: false, flicker: 0.5, flickerHz: 14 },
-  { id: 'rack_2', x: px(9.0), y: px(1.6), radius: 34, color: E.accent, intensity: 0.7, castShadow: false, flicker: 0.4, flickerHz: 17 },
-  { id: 'rack_3', x: px(4.8), y: px(3.9), radius: 32, color: E.accent, intensity: 0.8, castShadow: false, flicker: 0.5, flickerHz: 13 },
-  { id: 'rack_4', x: px(6.1), y: px(3.9), radius: 32, color: E.accent, intensity: 0.8, castShadow: false, flicker: 0.35, flickerHz: 19 },
-  { id: 'rack_5', x: px(7.4), y: px(3.9), radius: 32, color: E.accent, intensity: 0.8, castShadow: false, flicker: 0.6, flickerHz: 11 },
-  { id: 'term_1', x: px(11.2), y: px(1.5), radius: 40, color: E.screen, intensity: 0.6, castShadow: false, flicker: 0.2, flickerHz: 24 },
-  { id: 'term_2', x: px(20.4), y: px(3.2), radius: 40, color: E.screen, intensity: 0.6, castShadow: false, flicker: 0.2, flickerHz: 21 },
-  { id: 'term_3', x: px(24.4), y: px(11.4), radius: 40, color: E.screen, intensity: 0.55, castShadow: false, flicker: 0.25, flickerHz: 26 },
-  { id: 'vend', x: px(27.0), y: px(5.2), radius: 68, color: E.fill, intensity: 1.0, castShadow: true, flicker: 0.15, flickerHz: 6 },
-  { id: 'exit', x: px(26.5), y: px(1.2), radius: 36, color: E.accent, intensity: 0.6, castShadow: false },
-  { id: 'strobe', x: px(28.3), y: px(10.7), radius: 66, color: E.hazard, intensity: 0.9, castShadow: false, flicker: 1.6, flickerHz: 3.2 },
-  { id: 'sparks', x: px(19.6), y: px(10.6), radius: 58, color: E.fillCore, intensity: 0.8, castShadow: false, flicker: 1.8, flickerHz: 22 },
-  { id: 'strip_1', x: px(6.1), y: px(4.8), radius: 34, color: E.accent, intensity: 0.5, castShadow: false },
-  { id: 'strip_2', x: px(20.4), y: px(14.7), radius: 34, color: E.accent, intensity: 0.5, castShadow: false },
-  { id: 'strip_3', x: px(3.4), y: px(14.0), radius: 38, color: E.accent, intensity: 0.55, castShadow: false },
+  { id: 'rack_1', tx: 7.5, ty: 1.6, radius: 34, color: E.accent, intensity: 0.7, castShadow: false, flicker: 0.5, flickerHz: 14 },
+  { id: 'rack_2', tx: 9.0, ty: 1.6, radius: 34, color: E.accent, intensity: 0.7, castShadow: false, flicker: 0.4, flickerHz: 17 },
+  { id: 'rack_3', tx: 4.8, ty: 3.9, radius: 32, color: E.accent, intensity: 0.8, castShadow: false, flicker: 0.5, flickerHz: 13 },
+  { id: 'rack_4', tx: 6.1, ty: 3.9, radius: 32, color: E.accent, intensity: 0.8, castShadow: false, flicker: 0.35, flickerHz: 19 },
+  { id: 'rack_5', tx: 7.4, ty: 3.9, radius: 32, color: E.accent, intensity: 0.8, castShadow: false, flicker: 0.6, flickerHz: 11 },
+  { id: 'term_1', tx: 11.2, ty: 1.5, radius: 40, color: E.screen, intensity: 0.6, castShadow: false, flicker: 0.2, flickerHz: 24 },
+  { id: 'term_2', tx: 20.4, ty: 3.2, radius: 40, color: E.screen, intensity: 0.6, castShadow: false, flicker: 0.2, flickerHz: 21 },
+  { id: 'term_3', tx: 24.4, ty: 11.4, radius: 40, color: E.screen, intensity: 0.55, castShadow: false, flicker: 0.25, flickerHz: 26 },
+  { id: 'vend', tx: 27.0, ty: 5.2, radius: 68, color: E.fill, intensity: 1.0, castShadow: true, flicker: 0.15, flickerHz: 6 },
+  { id: 'exit', tx: 26.5, ty: 1.2, radius: 36, color: E.accent, intensity: 0.6, castShadow: false },
+  { id: 'strobe', tx: 28.3, ty: 10.7, radius: 66, color: E.hazard, intensity: 0.9, castShadow: false, flicker: 1.6, flickerHz: 3.2 },
+  { id: 'sparks', tx: 19.6, ty: 10.6, radius: 58, color: E.fillCore, intensity: 0.8, castShadow: false, flicker: 1.8, flickerHz: 22 },
+  { id: 'strip_1', tx: 6.1, ty: 4.8, radius: 34, color: E.accent, intensity: 0.5, castShadow: false },
+  { id: 'strip_2', tx: 20.4, ty: 14.7, radius: 34, color: E.accent, intensity: 0.5, castShadow: false },
+  { id: 'strip_3', tx: 3.4, ty: 14.0, radius: 38, color: E.accent, intensity: 0.55, castShadow: false },
   // The breaker panel is the one emissive prop with no light of its own, which
   // stopped mattering the moment emissives moved inside the lightmap multiply.
-  { id: 'breaker', x: px(28.4), y: px(5.4), radius: 30, color: E.accent, intensity: 0.5, castShadow: false, flicker: 0.6, flickerHz: 15 },
+  { id: 'breaker', tx: 28.4, ty: 5.4, radius: 30, color: E.accent, intensity: 0.5, castShadow: false, flicker: 0.6, flickerHz: 15 },
 ];
 
 /**
@@ -287,7 +284,7 @@ export const LAB_LIGHTS: readonly LightDef[] = [
  * layer is masked to them, so a prop reflects only if it happens to stand in
  * one. Placed where a ceiling has failed and where the drains are.
  */
-export const WET_PATCHES: ReadonlyArray<{ tx: number; ty: number; rx: number; ry: number }> = [
+export const WET_PATCHES: readonly WetPatch[] = [
   { tx: 17.4, ty: 7.4, rx: 2.6, ry: 1.3 }, // the two authored puddles, widened
   { tx: 14.2, ty: 11.2, rx: 2.8, ry: 1.4 },
   { tx: 3.0, ty: 7.9, rx: 2.4, ry: 1.5 }, // under the barrels — something leaked
@@ -297,20 +294,16 @@ export const WET_PATCHES: ReadonlyArray<{ tx: number; ty: number; rx: number; ry
   { tx: 8.3, ty: 11.8, rx: 2.6, ry: 1.2 },
 ];
 
-/** Wall occluders, merged into horizontal runs so the shadow pass has fewer rects. */
-export function wallOccluders(map: readonly string[]): Rect[] {
-  const out: Rect[] = [];
-  for (let y = 0; y < map.length; y++) {
-    const row = map[y]!;
-    let run = -1;
-    for (let x = 0; x <= row.length; x++) {
-      const solid = row[x] === '#';
-      if (solid && run < 0) run = x;
-      if (!solid && run >= 0) {
-        out.push({ x: run * TILE, y: y * TILE, w: (x - run) * TILE, h: TILE });
-        run = -1;
-      }
-    }
-  }
-  return out;
-}
+/**
+ * ONE lane, horizontal, through the open middle band.
+ *
+ * It was a cross — a horizontal lane plus a vertical run meeting dead centre —
+ * which quarters the frame around a patch of empty floor and puts a crosshair
+ * on nothing. A single lane is a leading line: it starts under the bright
+ * top-left cluster and runs out to the dim vending corner, which is the
+ * diagonal the whole light rig is built on.
+ */
+export const LAB_TILES: TileAuthoring = { walkRows: [7] };
+
+/** Tile variants and dust. Fixed, so the room is the same room every reload. */
+export const LAB_SEED = 1;

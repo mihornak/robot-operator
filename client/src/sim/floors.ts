@@ -6,8 +6,19 @@
  * Entity ids here are PINNED — the director references them exactly.
  * Walkability law: robot r=7, enemy r=9 — every passage is ≥2 tiles wide.
  */
-import type { ChipId, Entity, Vec } from '../../../shared/types';
+import type {
+  ChipId,
+  Entity,
+  LevelData,
+  LevelLit,
+  LevelMeta,
+  SoundEmitterDef,
+  TriggerDef,
+  Vec,
+} from '../../../shared/types';
 import { TILE, TILES_X, TILES_Y } from '../../../shared/types';
+import { CUSTOM_LEVELS } from '../levels/index';
+import { levelToFloorDef } from './levelLoader';
 
 export interface FloorDef {
   map: string[];
@@ -16,23 +27,43 @@ export interface FloorDef {
   /** Where the robot appears. Defaults to elevator A (it rode up the shaft);
    *  floor 1 overrides it to center screen, asleep inside the debris pile. */
   spawn?: Vec;
+  /** Authored region triggers (designer levels). loadFloor copies these into
+   *  state.triggers; the built-in floors carry none. */
+  triggers?: TriggerDef[];
+  /** Positional ambience. Pass-through: the sim never reads it — see
+   *  client/src/audio/emitters.ts. */
+  sounds?: SoundEmitterDef[];
+  /** Present on floors converted from a LevelData; absent on the built-ins. */
+  meta?: LevelMeta;
+  /**
+   * Authored lighting, dressing and look. Pure pass-through: the sim never
+   * reads a byte of it and nothing here is resolved against a default — that
+   * happens in `client/src/render/lit`. A floor without it renders on the
+   * classic path.
+   */
+  lit?: LevelLit;
 }
 
-const at = (tx: number, ty: number): Vec => ({ x: tx * TILE + TILE / 2, y: ty * TILE + TILE / 2 });
+/** Tile coords → the px centre of that tile. Exported for levelLoader. */
+export const at = (tx: number, ty: number): Vec => ({ x: tx * TILE + TILE / 2, y: ty * TILE + TILE / 2 });
 
 // ---------------------------------------------------------------- builders
+//
+// Exported so `levelLoader.ts` can build a designer level's entities through
+// exactly the same code the hand-authored floors use. A second table of
+// defaults would be a second place for "what a printer is" to drift.
 
-const elevA = (pos: Vec): Entity => ({ id: 'elevA', kind: 'elevatorA', pos, label: 'dead elevator behind robot', state: 'inert' });
-const elevB = (pos: Vec, dark = false): Entity => ({
+export const elevA = (pos: Vec): Entity => ({ id: 'elevA', kind: 'elevatorA', pos, label: 'dead elevator behind robot', state: 'inert' });
+export const elevB = (pos: Vec, dark = false): Entity => ({
   id: 'elevB',
   kind: 'elevatorB',
   pos,
   label: 'elevator', // THE elevator — the exit; A is labeled dead
   state: dark ? 'dark' : 'lit',
 });
-const scrap = (id: string, pos: Vec): Entity => ({ id, kind: 'scrap', pos, label: 'scrap' });
+export const scrap = (id: string, pos: Vec): Entity => ({ id, kind: 'scrap', pos, label: 'scrap' });
 /** A loose personality chip lying on the floor — the early-game reward. */
-const chip = (id: string, pos: Vec, option: ChipId): Entity => ({
+export const chip = (id: string, pos: Vec, option: ChipId): Entity => ({
   id,
   kind: 'chip',
   pos,
@@ -42,16 +73,16 @@ const chip = (id: string, pos: Vec, option: ChipId): Entity => ({
 });
 /** Heap of dead machines. Decorative and non-blocking (no tiles are solid under
  *  it) — the robot must be able to drive back out over its own bed. */
-const debris = (id: string, pos: Vec): Entity => ({
+export const debris = (id: string, pos: Vec): Entity => ({
   id,
   kind: 'debris',
   pos,
   label: 'pile of broken machines',
   state: 'settled',
 });
-const cable = (id: string, pos: Vec): Entity => ({ id, kind: 'cable', pos, label: 'sparking cable', state: 'spark' });
+export const cable = (id: string, pos: Vec): Entity => ({ id, kind: 'cable', pos, label: 'sparking cable', state: 'spark' });
 /** option undefined = the fixed tier-1 controller crate ('starter crate'). */
-const crate = (id: string, pos: Vec, option?: ChipId): Entity => ({
+export const crate = (id: string, pos: Vec, option?: ChipId): Entity => ({
   id,
   kind: 'crate',
   pos,
@@ -61,7 +92,7 @@ const crate = (id: string, pos: Vec, option?: ChipId): Entity => ({
 });
 /** The BRAIN upgrade crate (floor 4) — optionless like crate_EARS; the
  *  director runs its auto-ceremony on crate_reached. */
-const brainCrate = (pos: Vec): Entity => ({
+export const brainCrate = (pos: Vec): Entity => ({
   id: 'crate_BRAIN',
   kind: 'crate',
   pos,
@@ -70,14 +101,14 @@ const brainCrate = (pos: Vec): Entity => ({
 });
 /** The ceremony triad: ONE shiny crate per ceremony floor (2 & 5). The three
  *  chips are offered on the ceremony card, not as separate crates. */
-const triadCrate = (pos: Vec): Entity => ({
+export const triadCrate = (pos: Vec): Entity => ({
   id: 'crate_triad',
   kind: 'crate',
   pos,
   label: 'shiny crate',
   state: 'closed',
 });
-const printer = (id: string, pos: Vec, hp: number): Entity => ({
+export const printer = (id: string, pos: Vec, hp: number): Entity => ({
   id,
   kind: 'fusedPrinter',
   pos,
@@ -89,7 +120,7 @@ const printer = (id: string, pos: Vec, hp: number): Entity => ({
   ai: {},
 });
 /** Harmless decoys get hp so wrong-target shots land (enemy_hit/enemy_death comedy). */
-const innocent = (id: string, pos: Vec): Entity => ({
+export const innocent = (id: string, pos: Vec): Entity => ({
   id,
   kind: 'printerInnocent',
   pos,
@@ -98,14 +129,14 @@ const innocent = (id: string, pos: Vec): Entity => ({
   label: 'nice printer',
   state: 'idle',
 });
-const mop = (id: string, pos: Vec): Entity => ({ id, kind: 'mop', pos, hp: 1, maxHp: 1, label: 'mop' });
+export const mop = (id: string, pos: Vec): Entity => ({ id, kind: 'mop', pos, hp: 1, maxHp: 1, label: 'mop' });
 /** Office chair. Furniture the staff left behind — mop rules: harmless, named,
  *  shootable, and worth walking over to look at. Its sprite is the one baked
  *  from a 3D model (`tools/sprites.json`) rather than drawn by hand. */
-const chair = (id: string, pos: Vec): Entity => ({ id, kind: 'chair', pos, hp: 1, maxHp: 1, label: 'office chair' });
-const fuse = (id: string, pos: Vec): Entity => ({ id, kind: 'fuse', pos, label: 'fuse' });
+export const chair = (id: string, pos: Vec): Entity => ({ id, kind: 'chair', pos, hp: 1, maxHp: 1, label: 'office chair' });
+export const fuse = (id: string, pos: Vec): Entity => ({ id, kind: 'fuse', pos, label: 'fuse' });
 // Label must NOT contain "fuse" — "grab the fuse" would mis-target the socket.
-const socket = (id: string, pos: Vec): Entity => ({ id, kind: 'fuseSocket', pos, label: 'power socket', state: 'empty' });
+export const socket = (id: string, pos: Vec): Entity => ({ id, kind: 'fuseSocket', pos, label: 'power socket', state: 'empty' });
 
 /**
  * Boss hull. Long enough for the fight to have phases, short enough that the
@@ -134,7 +165,7 @@ const BOSS_HP = 96;
  * machine/enemy/monster/thing/baddie → fusedPrinter through KIND_SYNONYMS, so a
  * boss with "printer" anywhere in its name is a boss the operator cannot name.
  */
-const shredder = (id: string, pos: Vec): Entity => ({
+export const shredder = (id: string, pos: Vec): Entity => ({
   id,
   kind: 'fusedShredder',
   pos,
@@ -167,7 +198,7 @@ const shredder = (id: string, pos: Vec): Entity => ({
 export const bossAdd = (id: string, pos: Vec): Entity => printer(id, pos, 3);
 /** The one upgrade on the boss floor — and the reason to cross the room while
  *  something is dropping mortars on it. */
-const rocketCrate = (pos: Vec): Entity => ({
+export const rocketCrate = (pos: Vec): Entity => ({
   id: 'crate_ROCKET',
   kind: 'crate',
   pos,
@@ -532,13 +563,88 @@ const FLOOR_BOSS: FloorDef = {
  * construction: it is reachable only by `?floor=6`, and nothing before it
  * changes because it exists.
  */
-export const FLOORS: FloorDef[] = [
+export const BUILTIN_FLOORS: readonly FloorDef[] = [
   FLOOR_OPENING, // 1 — wake up
   FLOOR_MEMORY, // 2 — the memory chip, out round the island
   FLOOR_MOVEMENT, // 3 — two doors, one bites
   FLOOR_GAUNTLET, // 4 — fuse, socket, and the first real fight
   FLOOR_FIRST_MACHINE, // 5 — sharper ears, and a machine to use them on
   FLOOR_BOSS, // 6 — the shredder; trailer-only, off the end of the run
+];
+
+// ------------------------------------------------------- custom levels in
+//
+// A designer level joins FLOORS one of two ways, and the difference is whether
+// the shipping run can ever see it.
+//
+// APPEND (no `meta.replaces`) is the safe default and the old behaviour: the
+// director ends the run at FLOORS_IN_RUN cleared, so a level added off the end
+// is reachable only by `?floor=N` and nothing before it changes.
+//
+// REPLACE (`meta.replaces: N`, 1-based) puts the level IN the run, standing
+// where BUILTIN_FLOORS[N-1] stood. That is the whole point — a floor drawn in
+// the designer becoming the floor the player actually plays — and it is also
+// why the guard below exists: everything keyed by floor NUMBER (the director's
+// ceremonies, `TRIADS` in shared/content.ts, `PINNED_IDS` in sim/selftest.ts)
+// keeps pointing at the slot, not at the room that used to fill it.
+
+const sortedCustoms = [...CUSTOM_LEVELS].sort((a, b) => a.meta.order - b.meta.order);
+
+/**
+ * Levels that failed the `replaces` guard, as sentences a reader can act on.
+ *
+ * NOT a throw. This module is imported by the game, the designer and the test
+ * suite alike, and a module-init exception in a level file's metadata is a
+ * black screen everywhere at once — including in the designer, which is where
+ * the mistake would have to be fixed. So a bad `replaces` falls back to the
+ * behaviour that cannot hurt anything (append), and `runSelftest` turns this
+ * list into a build failure.
+ */
+export const REPLACEMENT_ERRORS: string[] = [];
+
+/**
+ * 0-based slot (floor N-1) → the level standing in it. Levels that fail the
+ * guard are simply absent, which is what makes them fall through to the append
+ * list below without a second decision anywhere.
+ */
+const replacementFor = ((): ReadonlyMap<number, LevelData> => {
+  const out = new Map<number, LevelData>();
+  for (const lv of sortedCustoms) {
+    const n = lv.meta.replaces;
+    if (n === undefined) continue;
+    if (!Number.isInteger(n) || n < 1 || n > BUILTIN_FLOORS.length) {
+      REPLACEMENT_ERRORS.push(
+        `level '${lv.meta.id}' replaces floor ${n}, which is not a built-in floor (want 1..${BUILTIN_FLOORS.length}) — it was appended instead`,
+      );
+      continue;
+    }
+    const first = out.get(n - 1);
+    if (first) {
+      REPLACEMENT_ERRORS.push(
+        `levels '${first.meta.id}' and '${lv.meta.id}' both replace floor ${n} — '${lv.meta.id}' was appended instead`,
+      );
+      continue;
+    }
+    out.set(n - 1, lv);
+  }
+  return out;
+})();
+
+/** True when floor index `i` is a designer level standing in a built-in's slot. */
+export const isReplacedFloor = (i: number): boolean => replacementFor.has(i);
+
+/**
+ * The running order: every built-in slot (filled by its replacement where one
+ * claimed it), then every level that did not claim a slot, in `meta.order`.
+ */
+export const FLOORS: FloorDef[] = [
+  ...BUILTIN_FLOORS.map((def, i) => {
+    const lv = replacementFor.get(i);
+    return lv ? levelToFloorDef(lv) : def;
+  }),
+  ...sortedCustoms
+    .filter((lv) => replacementFor.get((lv.meta.replaces ?? 0) - 1) !== lv)
+    .map(levelToFloorDef),
 ];
 
 /** Parse an ASCII map into the walkability grid. Throws on malformed maps. */

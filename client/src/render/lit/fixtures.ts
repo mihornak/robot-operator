@@ -22,8 +22,8 @@
  * Every style keeps its own light: only the SPRITE changes, never the rig.
  */
 
-import type { Drawer } from '../art/px';
-import type { Px } from '../art/px';
+import type { Drawer } from '../../art/px';
+import type { Px } from '../../art/px';
 import { E, L, M } from './palette';
 
 const c = (n: number): string => '#' + n.toString(16).padStart(6, '0');

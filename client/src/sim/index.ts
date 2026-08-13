@@ -13,9 +13,11 @@ import type {
   ChipId,
   DirectiveKind,
   Entity,
+  LevelLit,
   Order,
   ParseEntity,
   SimState,
+  SoundEmitterDef,
   Standing,
 } from '../../../shared/types';
 import { defaultStanding } from '../../../shared/types';
@@ -37,12 +39,31 @@ import { stepMortars } from './mortar';
 import { stepBoss } from './boss';
 import { dist } from './physics';
 import { proximityTriggers, stepRobot } from './robot';
+import { levelTriggers } from './triggers';
 
 export { entityById } from './internal';
 
 /** How many floors exist. The dev `?floor=N` shortcut bounds itself on this, so
  *  adding a floor never needs a second edit in the director to be reachable. */
 export const FLOOR_COUNT = FLOORS.length;
+
+/**
+ * The positional ambience authored on a floor. Deliberately NOT sim state: the
+ * sim neither reads nor emits sound, and the director walks this list against
+ * the robot's position each frame (client/src/audio/emitters.ts).
+ */
+export function floorSounds(floorIndex: number): SoundEmitterDef[] {
+  return FLOORS[floorIndex]?.sounds ?? [];
+}
+
+/**
+ * The authored lighting of a floor, unresolved and untouched — see `FloorDef.lit`.
+ * Same deal as `floorSounds`: pure pass-through data the sim carries and never
+ * reads, handed to whoever does know what a light is.
+ */
+export function floorLit(floorIndex: number): LevelLit | null {
+  return FLOORS[floorIndex]?.lit ?? null;
+}
 
 /**
  * Nearest live hostile with its distance to the robot, for the director.
@@ -110,6 +131,7 @@ export function initialState(seed: number): SimState {
     solid: [],
     events: [],
     frozen: false,
+    triggers: [],
   };
   loadFloor(state, 0);
   return state;
@@ -136,6 +158,9 @@ export function loadFloor(state: SimState, floorIndex: number): void {
   // keeps the determinism snapshot meaningful across a floor change.
   state.nextId = 0;
   state.events = [];
+  // Fresh runtime records per load: `fired`/`inside` belong to this visit to
+  // the floor, the def itself is shared read-only level data.
+  state.triggers = (def.triggers ?? []).map((t) => ({ def: t, fired: false, inside: false }));
 
   const r = state.robot;
   const a = entityById(state, 'elevA');
@@ -188,6 +213,10 @@ export function step(state: SimState): void {
     stepBoss(state, scratch);
   }
   proximityTriggers(state);
+  // Last: an authored trigger may open a door or stand a machine up, and doing
+  // that before the robot has finished moving would let the same tick both
+  // create the wall and collide the robot with it.
+  levelTriggers(state);
 }
 
 /**

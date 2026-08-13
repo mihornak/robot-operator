@@ -1,11 +1,12 @@
 /**
- * LAB PALETTE — deliberately not the shipping palette law.
+ * LIT PALETTE — deliberately not the flat-render palette law.
  *
- * The shipping world is near-monochrome cold gray on purpose. This lab asks a
- * different question: what does the same room look like when the *material* is
- * still restrained but the *light* does the coloring? So the ramp keeps a tight
- * value structure (nothing here is bright — the brightest surface tone is still
- * only ~55% luma) and all the saturation arrives from the lightmap.
+ * The classic world is near-monochrome cold gray on purpose. The lit renderer
+ * asks a different question: what does the same room look like when the
+ * *material* is still restrained but the *light* does the coloring? So the ramp
+ * keeps a tight value structure (nothing here is bright — the brightest surface
+ * tone is still only ~55% luma) and all the saturation arrives from the
+ * lightmap.
  *
  * Rule of thumb used throughout: surfaces are cool and desaturated, LIGHT is
  * warm and saturated, and exactly one accent hue (cyan-green) marks "powered

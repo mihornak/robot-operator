@@ -14,6 +14,7 @@ import type {
   SimEvent,
   SimEventType,
   SimState,
+  TriggerAction,
   Vec,
 } from '../../../shared/types';
 import { rngNext } from '../../../shared/rng';
@@ -430,10 +431,13 @@ export function emit(
   type: SimEventType,
   id?: string,
   data?: Record<string, string | number>,
+  /** `trigger_fired` only — the presentation actions the sim will not perform. */
+  actions?: TriggerAction[],
 ): void {
   const ev: SimEvent = { type };
   if (id !== undefined) ev.id = id;
   if (data !== undefined) ev.data = data;
+  if (actions !== undefined) ev.actions = actions;
   state.events.push(ev);
 }
 

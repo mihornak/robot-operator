@@ -5,7 +5,7 @@
  * SFX are lazy-loaded mp3s with synthesized fallbacks — never silent.
  */
 
-import type { AudioEngine, SfxName } from '@shared/types';
+import type { AudioEngine, LoopHandle, SfxName } from '@shared/types';
 import { FALLBACKS, Synth, brownBuffer, crackleBuffer, crushCurve, satCurve } from './synth';
 
 const DUCK_LEVEL = 0.5; // -6dB on ambient while voice plays
@@ -78,6 +78,7 @@ export class WebAudioEngine implements AudioEngine {
   private musicDuck!: GainNode; // voice ducking target on the music side
 
   private sfx = new Map<SfxName, AudioBuffer | 'loading' | 'missing'>();
+  private sfxLoads = new Map<SfxName, Promise<AudioBuffer | null>>();
   private voiceSrc: AudioBufferSourceNode | null = null;
   private voiceDone: (() => void) | null = null;
   private musicSrc: AudioBufferSourceNode | null = null;
@@ -104,7 +105,7 @@ export class WebAudioEngine implements AudioEngine {
     this.ctx = ctx;
     this.buildGraph(ctx);
     this.installResumeHandlers(ctx);
-    for (const name of Object.keys(FALLBACKS) as SfxName[]) this.loadSfx(name);
+    for (const name of Object.keys(FALLBACKS) as SfxName[]) void this.loadSfx(name);
     if (ctx.state !== 'running') await ctx.resume().catch(() => {});
     this._ready = true;
   }
@@ -144,8 +145,53 @@ export class WebAudioEngine implements AudioEngine {
       src.start();
       return;
     }
-    if (cached === undefined) this.loadSfx(name);
+    if (cached === undefined) void this.loadSfx(name);
     FALLBACKS[name](new Synth(ctx, this.sfxBus, volume));
+  }
+
+  /**
+   * A looping sound with a live fader — what a placed ambience needs and
+   * playSfx cannot give it (its gain is fixed at start, and the emitter's whole
+   * job is to move with the robot).
+   *
+   * Fail-soft to SILENCE, deliberately: the synth FALLBACKS are one-shot
+   * gestures with envelopes, and looping one produces a machine-gun of clicks
+   * rather than ambience. A build with no mp3s keeps its handle and its fader
+   * and simply plays nothing, exactly like a missing music bed.
+   */
+  startLoop(name: SfxName, opts?: { volume?: number }): LoopHandle {
+    const ctx = this.ctx;
+    if (!ctx) return { setGain: () => {}, stop: () => {} };
+    const g = ctx.createGain();
+    g.gain.value = Math.max(0, Math.min(1, opts?.volume ?? 0));
+    g.connect(this.sfxBus);
+    let src: AudioBufferSourceNode | null = null;
+    let stopped = false;
+    const attach = (buf: AudioBuffer): void => {
+      if (stopped) return;
+      src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.loop = true;
+      src.connect(g);
+      src.start();
+    };
+    const cached = this.sfx.get(name);
+    if (cached instanceof AudioBuffer) attach(cached);
+    else void this.loadSfx(name).then((buf) => (buf ? attach(buf) : undefined));
+    return {
+      setGain: (v: number) => {
+        g.gain.setTargetAtTime(Math.max(0, Math.min(1, v)), ctx.currentTime, 0.05);
+      },
+      stop: () => {
+        stopped = true;
+        try {
+          src?.stop();
+        } catch {
+          /* never started */
+        }
+        g.disconnect();
+      },
+    };
   }
 
   /** Rejects on decode failure — director falls back to caption-only. */
@@ -467,16 +513,31 @@ export class WebAudioEngine implements AudioEngine {
     };
   }
 
-  private loadSfx(name: SfxName): void {
-    if (this.sfx.has(name)) return;
+  /**
+   * Fetch + decode once. Resolves with the buffer, or null when there is no
+   * file — startLoop waits on this, every other caller fires and forgets and
+   * lets the synth fallback cover the gap.
+   */
+  private loadSfx(name: SfxName): Promise<AudioBuffer | null> {
+    const pending = this.sfxLoads.get(name);
+    if (pending) return pending;
+    const cached = this.sfx.get(name);
+    if (cached instanceof AudioBuffer) return Promise.resolve(cached);
+    if (cached === 'missing') return Promise.resolve(null);
     this.sfx.set(name, 'loading');
-    fetch(`./assets/sfx/${name}.mp3`)
+    const load = fetch(`./assets/sfx/${name}.mp3`)
       .then(async (res) => {
         if (!res.ok) throw new Error(`sfx ${res.status}`);
         const buf = await this.requireCtx().decodeAudioData(await res.arrayBuffer());
         this.sfx.set(name, buf);
+        return buf;
       })
-      .catch(() => this.sfx.set(name, 'missing')); // synth fallback from here on
+      .catch(() => {
+        this.sfx.set(name, 'missing'); // synth fallback from here on
+        return null;
+      });
+    this.sfxLoads.set(name, load);
+    return load;
   }
 
   private playVoiceBuffer(buf: AudioBuffer): Promise<void> {

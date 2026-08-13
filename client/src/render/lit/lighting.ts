@@ -25,7 +25,7 @@ import {
   Sprite,
   Texture,
 } from 'pixi.js';
-import { canvasTex } from '../render/util';
+import { canvasTex } from '../util';
 
 export interface Rect {
   x: number;
@@ -248,6 +248,17 @@ export class LightMap {
 
   get(id: string): LiveLight | undefined {
     return this.lights.find((l) => l.id === id);
+  }
+
+  /** Drop the whole rig — one render target per light, so they have to go. */
+  clearLights(): void {
+    for (const l of this.lights) {
+      l.sprite.destroy();
+      l.rt.destroy(true);
+    }
+    this.lights.length = 0;
+    this.lightRoot.removeChildren();
+    this.geomVersion++;
   }
 
   /** Force every light to re-bake — call after moving lights or props. */

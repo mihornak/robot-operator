@@ -32,6 +32,7 @@ import * as sim from '../sim/index';
 import { initArt } from '../art/index';
 import { createRenderApp } from '../render/index';
 import { blastGain, createAudioEngine } from '../audio/engine';
+import { stopAllEmitters, updateEmitters } from '../audio/emitters';
 import type { MicCommandSource } from '../voice/webspeech';
 import { SILENT_RMS, WebSpeechSource } from '../voice/webspeech';
 import { LlmSpeechSource } from '../voice/llmspeech';
@@ -403,11 +404,20 @@ class Director {
           steps++;
         }
         if (acc > TICK_MS) acc = TICK_MS; // step cap hit — keep alpha ≤ 1
+        // Placed ambience follows the robot. Outside the fixed-step loop on
+        // purpose: this is a fade, not a rule, and it belongs to the frame.
+        updateEmitters(this.audio, sim.floorSounds(this.state.floorIndex), this.state.robot.pos);
       } else {
         acc = 0;
       }
       this.updatePresentation(now, dt);
-      this.render.render({ sim: this.state, ui: this.ui, alpha: acc / TICK_MS, frameEvents });
+      this.render.render({
+        sim: this.state,
+        ui: this.ui,
+        alpha: acc / TICK_MS,
+        frameEvents,
+        lit: sim.floorLit(this.state.floorIndex),
+      });
     };
     rafChain();
   }
@@ -1912,6 +1922,52 @@ class Director {
           }
           break;
         }
+        // An authored level trigger went off. The sim already did the half that
+        // changes the world (doors, ambushes, power); what arrives here is the
+        // half it refuses to do — the noise. Lines come from the level data
+        // verbatim, so a designer writing them owns rule 7 themselves.
+        case 'trigger_fired': {
+          for (const a of ev.actions ?? []) {
+            switch (a.type) {
+              case 'say':
+                this.speech.sayText(a.line, 'beat');
+                break;
+              case 'sfx':
+                this.audio.playSfx(
+                  a.sound,
+                  a.at
+                    ? {
+                        volume: blastGain(
+                          Math.hypot(
+                            this.state.robot.pos.x - a.at.x,
+                            this.state.robot.pos.y - a.at.y,
+                          ),
+                        ),
+                      }
+                    : undefined,
+                );
+                break;
+              case 'hum':
+                this.audio.setHum(a.level);
+                break;
+              case 'shake':
+                this.render.fx.shake(3, a.ms);
+                break;
+              case 'light': {
+                // Kill the tubes, slam the bay red. Presentation, like `say`:
+                // the lightmap is not part of the world the sim reasons about.
+                const state: { on?: boolean; intensity?: number } = {};
+                if (a.on !== undefined) state.on = a.on;
+                if (a.intensity !== undefined) state.intensity = a.intensity;
+                this.render.setLight(a.target, state);
+                break;
+              }
+              default:
+                break; // world actions already ran in the sim
+            }
+          }
+          break;
+        }
         case 'chip_detour':
           break;
       }
@@ -1978,6 +2034,7 @@ class Director {
     this.state.frozen = false;
     this.ui.phase = 'play';
     this.speech.clear();
+    stopAllEmitters(); // the room those sounds belonged to is behind the doors
     this.audio.playSfx('elevator_ding');
     this.render.fx.staticBurst(450);
     this.audio.playSfx('static_burst');
@@ -2015,6 +2072,7 @@ class Director {
     this.ui.upgrade = null; // a reveal does not outlive the robot holding it
     this.speech.clear();
     this.audio.playSfx('powerdown');
+    stopAllEmitters();
     // Dying in the arena takes the bed with it — the death card plays over a
     // dead feed, and a boss loop still going under it would say the fight is
     // somehow continuing without the robot.
@@ -2051,6 +2109,7 @@ class Director {
     this.clearQuestion();
     this.speech.clear();
     this.audio.stopMusic(0); // a new run starts in a quiet building
+    stopAllEmitters();
     this.render.fx.deadCam(false);
     this.state = sim.initialState((Date.now() % 2147483647) | 0);
     // The pile beat is a one-time opening, not a death penalty: a restart is
@@ -2098,6 +2157,7 @@ class Director {
     const next = this.state.floorIndex + 2;
     this.ui.osd = `CAM 0${next} · FLOOR 0${next} · NO SIGNAL`;
     this.render.fx.deadCam(true);
+    stopAllEmitters(); // the feed is dead; the room it was watching goes with it
     this.audio.playSfx('static_burst');
     this.audio.setHum(0.25);
     logEvent('cliffhanger_reached');

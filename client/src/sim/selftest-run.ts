@@ -17,7 +17,14 @@ const nodeModule = (await import('node:' + 'module')) as unknown as {
 
 nodeModule.registerHooks({
   resolve(specifier, context, nextResolve) {
-    if ((specifier.startsWith('./') || specifier.startsWith('../')) && !/\.\w+$/.test(specifier)) {
+    // Anything relative that does not already name a MODULE extension gets
+    // `.ts`. Deliberately a list rather than /\.\w+$/: designer levels are
+    // `<id>.level.ts`, and a bare dot test reads `./showcase.level` as a file
+    // that already has an extension and then cannot find it.
+    if (
+      (specifier.startsWith('./') || specifier.startsWith('../')) &&
+      !/\.(?:ts|js|mjs|cjs|json)$/.test(specifier)
+    ) {
       return nextResolve(`${specifier}.ts`, context);
     }
     return nextResolve(specifier, context);

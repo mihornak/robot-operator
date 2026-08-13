@@ -5,9 +5,11 @@
  */
 
 import { Application, Container, Graphics, Rectangle, TextureStyle } from 'pixi.js';
-import type { ArtAtlas, RenderApp, RenderFx, RenderView } from '@shared/types';
+import type { RenderApp, RenderFx, RenderView } from '@shared/types';
 import { VIEW_H, VIEW_W } from '@shared/types';
+import type { PixiArtAtlas } from '../art';
 import { CrtStack } from './crt';
+import { LitWorldView } from './litWorld';
 import { Osd } from './osd';
 import { Overlays } from './overlays';
 import { WorldView } from './world';
@@ -22,13 +24,23 @@ async function loadFont(family: string, url: string): Promise<void> {
   }
 }
 
-export function createRenderApp(art: ArtAtlas): RenderApp {
+export function createRenderApp(art: PixiArtAtlas): RenderApp {
   const app = new Application();
   const frame = new Container();
   const crtWrap = new Container();
+  /**
+   * What the CRT jitters, zooms and snapshots — one of the two world paths is
+   * inside it at a time. The jitter lives out here rather than on either path
+   * because it is the CAMERA, and swapping renderers must not swap how the
+   * camera moves.
+   */
+  const worldRoot = new Container();
   let letterbox: Graphics;
   let crt: CrtStack;
   let world: WorldView;
+  /** Mounted only while the loaded floor authored lighting. */
+  let lit: LitWorldView | null = null;
+  let mountedFloor = -1;
   let osd: Osd;
   let overlays: Overlays;
   let inited = false;
@@ -94,16 +106,17 @@ export function createRenderApp(art: ArtAtlas): RenderApp {
     osd = new Osd(art);
     overlays = new Overlays(art);
     crt = new CrtStack(crtWrap);
+    worldRoot.addChild(world.container);
     // tear bands snapshot the WORLD only — the OSD is burned in by the
     // monitor and never tears
-    crt.attachFeed(app.renderer, world.container);
+    crt.attachFeed(app.renderer, worldRoot);
     // center pivot so the rare auto-focus "breathe" zoom pulses around center
-    world.container.pivot.set(VIEW_W / 2, VIEW_H / 2);
+    worldRoot.pivot.set(VIEW_W / 2, VIEW_H / 2);
 
     const feedBg = new Graphics().rect(0, 0, VIEW_W, VIEW_H).fill(0x08090b);
     crtWrap.addChild(
       feedBg,
-      world.container,
+      worldRoot,
       crt.fxLayer, // static bursts / roll / boot bloom cover the feed…
       osd.container, // …but the OSD is burned in by the MONITOR — always on top
       overlays.container, // death card & title above dead static
@@ -134,28 +147,62 @@ export function createRenderApp(art: ArtAtlas): RenderApp {
     inited = true;
   }
 
+  /**
+   * Put the right renderer in the world container for the floor that is
+   * loaded. Driven off `sim.floorIndex` rather than off a call the director
+   * makes, so a floor load can never forget to say which room it is now.
+   */
+  function mountFloor(view: RenderView): void {
+    mountedFloor = view.sim.floorIndex;
+    if (lit) {
+      worldRoot.removeChild(lit.container);
+      lit.destroy();
+      lit = null;
+    }
+    if (view.lit) {
+      if (world.container.parent === worldRoot) worldRoot.removeChild(world.container);
+      lit = new LitWorldView(app.renderer, art, view.lit, view.sim.solid);
+      worldRoot.addChild(lit.container);
+    } else {
+      if (world.container.parent !== worldRoot) worldRoot.addChild(world.container);
+      // The classic path rebuilds its tilemap when floorIndex changes — but it
+      // has been asleep while a lit floor was up, so its idea of which floor it
+      // last built is stale by definition.
+      world.markDirty();
+    }
+    if (import.meta.env.DEV) (globalThis as { __lit?: unknown }).__lit = lit;
+  }
+
   function render(view: RenderView): void {
     if (!inited) return;
     const now = performance.now();
     const dt = lastNow < 0 ? 1 / 60 : Math.min(0.1, (now - lastNow) / 1000);
     lastNow = now;
 
+    if (view.sim.floorIndex !== mountedFloor) mountFloor(view);
+
     // every sim event since last frame (multiple steps may run per rAF);
     // robot_damage screen fx come from the director via fx — not here
-    for (const ev of view.frameEvents) world.handleEvent(ev, view);
+    for (const ev of view.frameEvents) (lit ?? world).handleEvent(ev, view);
 
-    world.update(view, dt);
+    if (lit) lit.update(view, dt);
+    else world.update(view, dt);
     osd.update(view.ui, dt);
     overlays.update(view.ui, dt);
 
+    // The lit room composes into its own 480×270 target BEFORE the CRT stack
+    // runs: the stack's tear bands snapshot the feed inside update().
+    lit?.compose(now / 1000);
+
     const f = crt.update(dt, view.ui.danger, view.ui.degrade);
     // pivot sits at feed center (init) — position carries it back + jitter
-    world.container.position.set(VIEW_W / 2 + f.ox, VIEW_H / 2 + f.oy);
-    world.container.scale.set(f.zoom);
+    worldRoot.position.set(VIEW_W / 2 + f.ox, VIEW_H / 2 + f.oy);
+    worldRoot.scale.set(f.zoom);
     // phosphor glow rides the robot — the only bright thing on the feed
+    const robot = (lit ?? world).robot;
     crt.setGlow(
-      world.robot.container.x + f.ox,
-      world.robot.container.y + f.oy,
+      robot.container.x + f.ox,
+      robot.container.y + f.oy,
       view.sim.robot.alive && !view.sim.robot.dormant,
     );
 
@@ -170,5 +217,11 @@ export function createRenderApp(art: ArtAtlas): RenderApp {
     deadCam: (on: boolean) => inited && crt.deadCam(on),
   };
 
-  return { init, render, fx };
+  return {
+    init,
+    render,
+    fx,
+    // Fail-soft by construction: no lit floor, nothing to dim.
+    setLight: (id, state) => lit?.setLight(id, state),
+  };
 }
